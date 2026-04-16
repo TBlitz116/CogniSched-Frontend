@@ -15,6 +15,17 @@ interface MeetingRequest {
   summary?: string
 }
 
+interface StudentTicket {
+  id: number
+  title: string
+  description: string | null
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'
+  resolution_note: string | null
+  created_at: string
+  resolved_at: string | null
+  ta: { id: number; name: string } | null
+}
+
 
 const STATUS_STYLES: Record<string, string> = {
   PENDING:   'bg-yellow-100 text-yellow-700',
@@ -30,11 +41,13 @@ export default function StudentDashboard() {
   const [requests, setRequests] = useState<MeetingRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [user, setUser] = useState<{ name: string; email: string } | null>(null)
+  const [tickets, setTickets] = useState<StudentTicket[]>([])
 
   useEffect(() => {
     Promise.all([
       api.get('/users/me').then(r => setUser(r.data)),
       api.get('/requests/mine').then(r => setRequests(r.data)),
+      api.get('/tickets/for-me').then(r => setTickets(r.data)).catch(() => {}),
     ]).finally(() => setLoading(false))
   }, [])
 
@@ -71,9 +84,20 @@ export default function StudentDashboard() {
           <h1 className="text-lg font-semibold text-gray-900">Scheduler</h1>
           {user && <p className="text-xs text-gray-500">{user.name} · Student</p>}
         </div>
-        <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition">
-          Sign out
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/settings')}
+            className="p-2 text-gray-500 hover:text-gray-800 transition"
+            title="Account Settings"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition">
+            Sign out
+          </button>
+        </div>
       </header>
 
       <main className="max-w-2xl mx-auto px-4 py-10 flex flex-col gap-8">
@@ -141,6 +165,46 @@ export default function StudentDashboard() {
 
         {!loading && requests.length === 0 && (
           <p className="text-center text-gray-400 text-sm">No requests yet. Send one above.</p>
+        )}
+
+        {/* Tickets section */}
+        {!loading && tickets.length > 0 && (
+          <section className="flex flex-col gap-3">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Action Tickets</h2>
+            <p className="text-xs text-gray-400 -mt-1">Items your TA escalated to the professor on your behalf.</p>
+            {tickets.map(ticket => (
+              <div key={ticket.id} className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 flex flex-col gap-2">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-semibold text-gray-800 flex-1">{ticket.title}</p>
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${
+                    ticket.status === 'OPEN' ? 'bg-yellow-100 text-yellow-700' :
+                    ticket.status === 'IN_PROGRESS' ? 'bg-blue-100 text-blue-700' :
+                    'bg-green-100 text-green-700'
+                  }`}>
+                    {ticket.status.replace('_', ' ')}
+                  </span>
+                </div>
+                {ticket.description && (
+                  <p className="text-xs text-gray-500 line-clamp-3">{ticket.description}</p>
+                )}
+                {ticket.resolution_note && (
+                  <div className="bg-green-50 border border-green-100 rounded-lg px-3 py-2">
+                    <p className="text-xs text-green-700 font-medium">Professor's note</p>
+                    <p className="text-xs text-green-700 mt-0.5">{ticket.resolution_note}</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-2 text-xs text-gray-400 flex-wrap">
+                  {ticket.ta && <span>Via {ticket.ta.name}</span>}
+                  <span>·</span>
+                  <span className={`font-medium ${ticket.shared_with_professor ? 'text-orange-500' : 'text-indigo-500'}`}>
+                    {ticket.shared_with_professor ? 'With professor' : 'TA handling'}
+                  </span>
+                  <span>·</span>
+                  <span>{formatTime(ticket.created_at)}</span>
+                </div>
+              </div>
+            ))}
+          </section>
         )}
       </main>
     </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
@@ -12,6 +12,24 @@ import BurnoutBadge from '../components/BurnoutBadge'
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 interface Student { id: number; name: string; email: string }
+
+interface ActionItem {
+  title: string
+  description: string
+  shared_with_professor: boolean  // pre-filled by Gemini scope classification, TA can toggle
+}
+
+interface Ticket {
+  id: number
+  title: string
+  description: string | null
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'
+  shared_with_professor: boolean
+  resolution_note: string | null
+  created_at: string
+  resolved_at: string | null
+  student: Student | null
+}
 
 interface Notification {
   id: number
@@ -31,6 +49,8 @@ interface SlotExplanation {
   back_to_back: boolean
   burnout_risk_after: string
   urgency_respected: boolean
+  professor_cognitive_score: number | null
+  professor_load_label: string | null
 }
 
 interface Suggestion {
@@ -84,7 +104,7 @@ function fmtDate(iso: string) {
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
-type Tab = 'requests' | 'calendar' | 'analytics'
+type Tab = 'requests' | 'calendar' | 'analytics' | 'tickets'
 
 export default function TADashboard() {
   const navigate = useNavigate()
@@ -111,6 +131,18 @@ export default function TADashboard() {
   const [inviteSending, setInviteSending] = useState(false)
   const [inviteMsg, setInviteMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  // Tickets tab state
+  const [myStudents, setMyStudents] = useState<Student[]>([])
+  const [tickets, setTickets] = useState<Ticket[]>([])
+  const [ticketStudentId, setTicketStudentId] = useState<number | null>(null)
+  const [transcript, setTranscript] = useState('')
+  const [extracting, setExtracting] = useState(false)
+  const [extractedItems, setExtractedItems] = useState<ActionItem[] | null>(null)
+  const [submittingTickets, setSubmittingTickets] = useState(false)
+  const [ticketMsg, setTicketMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [sharingId, setSharingId] = useState<number | null>(null)
+  const [taResolvingId, setTaResolvingId] = useState<number | null>(null)
+
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
     api.get('/ta/notifications').then(r => setNotifications(r.data))
@@ -120,6 +152,9 @@ export default function TADashboard() {
   useEffect(() => {
     if (tab === 'calendar') {
       api.get('/ta/calendar').then(r => setCalendar(r.data))
+    } else if (tab === 'tickets') {
+      api.get('/mappings/my-students').then(r => setMyStudents(r.data)).catch(() => {})
+      api.get('/tickets/mine').then(r => setTickets(r.data)).catch(() => {})
     } else if (tab === 'analytics') {
       Promise.all([
         api.get('/analytics/cognitive').then(r => setCogScores(r.data)),
@@ -224,12 +259,84 @@ export default function TADashboard() {
     }
   }
 
+  async function extractItems() {
+    if (!ticketStudentId || !transcript.trim()) return
+    setExtracting(true)
+    setExtractedItems(null)
+    setTicketMsg(null)
+    try {
+      const res = await api.post('/tickets/extract', {
+        transcript,
+        student_id: ticketStudentId,
+      })
+      setExtractedItems(res.data.items)
+      if (res.data.items.length === 0) {
+        setTicketMsg({ type: 'error', text: 'No professor-actionable items found in this transcript.' })
+      }
+    } catch (e: any) {
+      setTicketMsg({ type: 'error', text: e.response?.data?.detail ?? 'Extraction failed' })
+    } finally {
+      setExtracting(false)
+    }
+  }
+
+  async function submitTickets() {
+    if (!ticketStudentId || !extractedItems?.length) return
+    setSubmittingTickets(true)
+    const sharedCount = extractedItems.filter(i => i.shared_with_professor).length
+    try {
+      await api.post('/tickets/create', {
+        student_id: ticketStudentId,
+        items: extractedItems,
+      })
+      const msg = sharedCount > 0
+        ? `${extractedItems.length} ticket${extractedItems.length !== 1 ? 's' : ''} created. ${sharedCount} sent to professor.`
+        : `${extractedItems.length} ticket${extractedItems.length !== 1 ? 's' : ''} created.`
+      setTicketMsg({ type: 'success', text: msg })
+      setTranscript('')
+      setExtractedItems(null)
+      setTicketStudentId(null)
+      const r = await api.get('/tickets/mine')
+      setTickets(r.data)
+    } catch (e: any) {
+      setTicketMsg({ type: 'error', text: e.response?.data?.detail ?? 'Failed to create tickets' })
+    } finally {
+      setSubmittingTickets(false)
+    }
+  }
+
+  async function shareTicket(id: number) {
+    setSharingId(id)
+    try {
+      await api.post(`/tickets/${id}/share`)
+      setTickets(prev => prev.map(t => t.id === id ? { ...t, shared_with_professor: true } : t))
+      setTicketMsg({ type: 'success', text: 'Ticket shared with professor.' })
+    } catch (e: any) {
+      setTicketMsg({ type: 'error', text: e.response?.data?.detail ?? 'Failed to share ticket' })
+    } finally {
+      setSharingId(null)
+    }
+  }
+
+  async function taResolveTicket(id: number) {
+    setTaResolvingId(id)
+    try {
+      await api.patch(`/tickets/${id}/ta-status`, { status: 'RESOLVED' })
+      setTickets(prev => prev.map(t => t.id === id ? { ...t, status: 'RESOLVED' } : t))
+    } catch (e: any) {
+      setTicketMsg({ type: 'error', text: e.response?.data?.detail ?? 'Failed to resolve ticket' })
+    } finally {
+      setTaResolvingId(null)
+    }
+  }
+
   function logout() { clearAuth(); navigate('/login') }
 
   const TABS: { key: Tab; label: string }[] = [
     { key: 'requests', label: 'Requests' },
     { key: 'calendar', label: 'Calendar' },
     { key: 'analytics', label: 'Analytics' },
+    { key: 'tickets', label: 'Tickets' },
   ]
 
   return (
@@ -257,7 +364,16 @@ export default function TADashboard() {
           >
             {inviteSending ? 'Sending…' : 'Invite Student'}
           </button>
-          <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition ml-2">
+          <button
+            onClick={() => navigate('/settings')}
+            className="p-2 text-gray-500 hover:text-gray-800 transition"
+            title="Account Settings"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition">
             Sign out
           </button>
         </div>
@@ -326,6 +442,34 @@ export default function TADashboard() {
         {tab === 'analytics' && (
           <AnalyticsTab scores={cogScores} burnout={burnout} density={density} />
         )}
+        {tab === 'tickets' && (
+          <TicketsTab
+            students={myStudents}
+            tickets={tickets}
+            studentId={ticketStudentId}
+            onStudentChange={setTicketStudentId}
+            transcript={transcript}
+            onTranscriptChange={setTranscript}
+            onExtract={extractItems}
+            extracting={extracting}
+            extractedItems={extractedItems}
+            onItemChange={(idx, field, val) => setExtractedItems(prev =>
+              prev ? prev.map((it, i) => i === idx ? { ...it, [field]: val } : it) : prev
+            )}
+            onItemToggleScope={(idx) => setExtractedItems(prev =>
+              prev ? prev.map((it, i) => i === idx ? { ...it, shared_with_professor: !it.shared_with_professor } : it) : prev
+            )}
+            onItemRemove={(idx) => setExtractedItems(prev => prev ? prev.filter((_, i) => i !== idx) : prev)}
+            onSubmit={submitTickets}
+            submitting={submittingTickets}
+            onShare={shareTicket}
+            sharingId={sharingId}
+            onTaResolve={taResolveTicket}
+            taResolvingId={taResolvingId}
+            msg={ticketMsg}
+            onClearMsg={() => setTicketMsg(null)}
+          />
+        )}
       </div>
     </div>
   )
@@ -392,129 +536,272 @@ function RequestsTab({
       </div>
 
       {/* Right: slot suggestions */}
-      <div className="flex-1 p-6 overflow-y-auto">
+      <div className="flex-1 flex flex-col overflow-hidden">
         {!selected && (
           <div className="flex items-center justify-center h-full text-gray-400 text-sm">
             Select a request to see AI-suggested slots
           </div>
         )}
-        {selected && (
-          <div className="max-w-2xl mx-auto flex flex-col gap-6">
-            {/* Request detail */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-              <div className="flex items-center gap-2 mb-2">
-                {selected.detected_priority && <PriorityBadge priority={selected.detected_priority} />}
-                <span className="text-xs text-gray-500">{selected.student.email}</span>
-              </div>
-              <p className="text-sm text-gray-800">{selected.prompt_text}</p>
-              {selected.preferred_time_range && (
-                <p className="text-xs text-gray-500 mt-1">Preferred: {selected.preferred_time_range}</p>
-              )}
-              <button
-                onClick={() => onDecline(selected.id)}
-                className="mt-3 text-xs text-red-500 hover:text-red-700 transition"
-              >
-                Decline request
-              </button>
-            </div>
-
-            {/* Prompt-based scheduling */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-              <h3 className="text-sm font-semibold text-gray-700 mb-3">Schedule with AI</h3>
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder-gray-400"
-                  placeholder='e.g. "tomorrow afternoon" or "find a light slot this week"'
-                  value={slotPrompt}
-                  onChange={e => onSlotPromptChange(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && onSuggestByPrompt()}
-                  disabled={promptLoading}
-                />
-                <button
-                  onClick={onSuggestByPrompt}
-                  disabled={promptLoading || !slotPrompt.trim()}
-                  className="bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition shrink-0"
-                >
-                  {promptLoading ? 'Finding slots…' : 'Find Slots'}
-                </button>
-              </div>
-              {promptReasoning && (
-                <p className="text-xs text-gray-500 mt-2 bg-gray-50 rounded-lg px-3 py-2">
-                  AI: {promptReasoning}
-                </p>
-              )}
-            </div>
-
-            {/* Rejected booking alerts */}
-            {rejectedBookings.length > 0 && (
-              <div className="bg-red-50 border border-red-200 rounded-xl p-4">
-                <p className="text-sm font-semibold text-red-700 mb-2">Rejected Bookings</p>
-                {rejectedBookings.map((r: any) => (
-                  <div key={r.id} className="text-xs text-red-600 mb-1">
-                    {r.student.name} — {fmt(r.start_time)} was rejected by professor. Please rebook.
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Slot suggestions with tabs */}
-            <div>
-              <div className="flex gap-1 mb-3">
-                {(['recommended', 'soonest'] as const).map(t => (
-                  <button
-                    key={t}
-                    onClick={() => onSlotTabChange(t)}
-                    className={`px-4 py-2 text-sm font-medium rounded-lg transition capitalize ${
-                      slotTab === t
-                        ? 'bg-indigo-600 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                    }`}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-
-              {slotTab === 'soonest' && (
-                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
-                  Soonest slots require professor approval before the meeting is confirmed.
-                </p>
-              )}
-
-              {slotTab === 'recommended' && (
-                <>
-                  {loadingSuggestions && <p className="text-sm text-gray-400">Generating suggestions…</p>}
-                  {!loadingSuggestions && suggestions.length === 0 && (
-                    <p className="text-sm text-gray-400">No available slots found in the priority window.</p>
-                  )}
-                  <div className="flex flex-col gap-4">
-                    {suggestions.map(s => (
-                      <SlotCard key={s.slot} suggestion={s} isBooking={bookingId === s.slot} onBook={() => onBook(s)} />
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {slotTab === 'soonest' && (
-                <>
-                  {loadingSoonest && <p className="text-sm text-gray-400">Finding soonest slots…</p>}
-                  {!loadingSoonest && soonestSuggestions.length === 0 && (
-                    <p className="text-sm text-gray-400">No available slots found.</p>
-                  )}
-                  <div className="flex flex-col gap-4">
-                    {soonestSuggestions.map(s => (
-                      <SlotCard key={s.slot} suggestion={s} isBooking={bookingId === s.slot} onBook={() => onBookSoonest(s)} buttonLabel="Request Approval" />
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+        {selected && <SelectedPanel
+          selected={selected}
+          suggestions={suggestions}
+          soonestSuggestions={soonestSuggestions}
+          loadingSuggestions={loadingSuggestions}
+          loadingSoonest={loadingSoonest}
+          bookingId={bookingId}
+          slotTab={slotTab}
+          onSlotTabChange={onSlotTabChange}
+          onBook={onBook}
+          onBookSoonest={onBookSoonest}
+          onDecline={onDecline}
+          slotPrompt={slotPrompt}
+          onSlotPromptChange={onSlotPromptChange}
+          onSuggestByPrompt={onSuggestByPrompt}
+          promptLoading={promptLoading}
+          promptReasoning={promptReasoning}
+          rejectedBookings={rejectedBookings}
+        />}
       </div>
     </div>
   )
 }
+
+// ── Selected panel (chat-style layout) ────────────────────────────────────────
+
+function SelectedPanel({
+  selected, suggestions, soonestSuggestions,
+  loadingSuggestions, loadingSoonest, bookingId,
+  slotTab, onSlotTabChange, onBook, onBookSoonest, onDecline,
+  slotPrompt, onSlotPromptChange, onSuggestByPrompt, promptLoading, promptReasoning,
+  rejectedBookings,
+}: {
+  selected: Notification
+  suggestions: Suggestion[]
+  soonestSuggestions: Suggestion[]
+  loadingSuggestions: boolean
+  loadingSoonest: boolean
+  bookingId: string | null
+  slotTab: 'recommended' | 'soonest'
+  onSlotTabChange: (t: 'recommended' | 'soonest') => void
+  onBook: (s: Suggestion) => void
+  onBookSoonest: (s: Suggestion) => void
+  onDecline: (id: number) => void
+  slotPrompt: string
+  onSlotPromptChange: (v: string) => void
+  onSuggestByPrompt: () => void
+  promptLoading: boolean
+  promptReasoning: string | null
+  rejectedBookings: any[]
+}) {
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom when slots or reasoning update
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [suggestions, soonestSuggestions, promptReasoning, promptLoading])
+
+  return (
+    <>
+      {/* Request detail — fixed top strip */}
+      <div className="shrink-0 border-b border-gray-200 bg-white px-6 py-4">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center gap-2 mb-1">
+            {selected.detected_priority && <PriorityBadge priority={selected.detected_priority} />}
+            <span className="text-xs text-gray-500">{selected.student.email}</span>
+            <button
+              onClick={() => onDecline(selected.id)}
+              className="ml-auto text-xs text-red-400 hover:text-red-600 transition"
+            >
+              Decline
+            </button>
+          </div>
+          <p className="text-sm text-gray-800">{selected.prompt_text}</p>
+          {selected.preferred_time_range && (
+            <p className="text-xs text-gray-400 mt-0.5">Preferred: {selected.preferred_time_range}</p>
+          )}
+        </div>
+      </div>
+
+      {/* Chat area — scrollable */}
+      <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="max-w-2xl mx-auto flex flex-col gap-4">
+
+          {/* Slot tab switcher */}
+          <div className="flex gap-1">
+            {(['recommended', 'soonest'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => onSlotTabChange(t)}
+                className={`px-4 py-1.5 text-sm font-medium rounded-lg transition capitalize ${
+                  slotTab === t
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+
+          {slotTab === 'soonest' && (
+            <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+              Soonest slots require professor approval before the meeting is confirmed.
+            </div>
+          )}
+
+          {/* Rejected bookings */}
+          {rejectedBookings.length > 0 && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+              <p className="text-sm font-semibold text-red-700 mb-2">Rejected Bookings</p>
+              {rejectedBookings.map((r: any) => (
+                <div key={r.id} className="text-xs text-red-600 mb-1">
+                  {r.student.name} — {fmt(r.start_time)} was rejected by professor. Please rebook.
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Slot cards */}
+          {slotTab === 'recommended' && (
+            <>
+              {loadingSuggestions && <TypingIndicator />}
+              {!loadingSuggestions && suggestions.length === 0 && (
+                <p className="text-sm text-gray-400">No available slots found in the priority window.</p>
+              )}
+              {suggestions.map(s => (
+                <SlotCard key={s.slot} suggestion={s} isBooking={bookingId === s.slot} onBook={() => onBook(s)} />
+              ))}
+            </>
+          )}
+
+          {slotTab === 'soonest' && (
+            <>
+              {loadingSoonest && <TypingIndicator />}
+              {!loadingSoonest && soonestSuggestions.length === 0 && (
+                <p className="text-sm text-gray-400">No available slots found.</p>
+              )}
+              {soonestSuggestions.map(s => (
+                <SlotCard key={s.slot} suggestion={s} isBooking={bookingId === s.slot} onBook={() => onBookSoonest(s)} buttonLabel="Request Approval" />
+              ))}
+            </>
+          )}
+
+          {/* AI reasoning bubble — appears after prompt results */}
+          {promptReasoning && (
+            <div className="flex items-start gap-3 mt-2">
+              <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center shrink-0 mt-0.5">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="bg-indigo-50 border border-indigo-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-indigo-800 max-w-md">
+                {promptReasoning}
+              </div>
+            </div>
+          )}
+
+          {/* Prompt loading indicator */}
+          {promptLoading && (
+            <div className="flex items-start gap-3">
+              <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <TypingIndicator />
+            </div>
+          )}
+
+          <div ref={bottomRef} />
+        </div>
+      </div>
+
+      {/* Chat prompt bar — fixed bottom */}
+      <div className="shrink-0 border-t border-gray-200 bg-white px-6 py-4">
+        <div className="max-w-2xl mx-auto">
+          <ChatPromptBar
+            value={slotPrompt}
+            onChange={onSlotPromptChange}
+            onSubmit={onSuggestByPrompt}
+            loading={promptLoading}
+          />
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── Chat UI components ─────────────────────────────────────────────────────────
+
+function TypingIndicator() {
+  return (
+    <div className="flex items-center gap-1.5 bg-gray-100 rounded-2xl px-4 py-3 w-fit">
+      <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
+      <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
+      <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
+    </div>
+  )
+}
+
+function ChatPromptBar({
+  value, onChange, onSubmit, loading,
+}: {
+  value: string
+  onChange: (v: string) => void
+  onSubmit: () => void
+  loading: boolean
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  function adjustHeight() {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      if (!loading && value.trim()) onSubmit()
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-end gap-3 bg-gray-50 border border-gray-300 rounded-2xl px-4 py-3 focus-within:ring-2 focus-within:ring-indigo-400 focus-within:border-indigo-400 transition">
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={value}
+          onChange={e => { onChange(e.target.value); adjustHeight() }}
+          onKeyDown={handleKeyDown}
+          disabled={loading}
+          placeholder='Ask AI — e.g. "tomorrow afternoon" or "avoid Mondays this week"'
+          className="flex-1 bg-transparent resize-none outline-none text-sm text-gray-800 placeholder-gray-400 leading-relaxed"
+          style={{ minHeight: '24px', maxHeight: '160px' }}
+        />
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={loading || !value.trim()}
+          className="shrink-0 bg-indigo-600 text-white rounded-xl p-2 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+          aria-label="Send"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10 17a.75.75 0 01-.75-.75V5.612L5.29 9.77a.75.75 0 01-1.08-1.04l5.25-5.5a.75.75 0 011.08 0l5.25 5.5a.75.75 0 11-1.08 1.04l-3.96-4.158V16.25A.75.75 0 0110 17z" clipRule="evenodd" />
+          </svg>
+        </button>
+      </div>
+      <p className="text-xs text-gray-400 text-center mt-1.5">Enter to send · Shift+Enter for new line</p>
+    </div>
+  )
+}
+
+// ── Slot card ──────────────────────────────────────────────────────────────────
 
 function SlotCard({
   suggestion, isBooking, onBook, buttonLabel,
@@ -575,6 +862,21 @@ function SlotCard({
         </div>
         {ex.urgency_respected && (
           <div className="text-indigo-500 col-span-2">Urgency priority respected</div>
+        )}
+        {ex.professor_load_label != null && (
+          <div className="col-span-2 mt-1 flex items-center gap-2 border-t border-gray-100 pt-2">
+            <span className="text-gray-500">Professor load this day:</span>
+            <span className={`font-semibold ${
+              ex.professor_load_label === 'Light'
+                ? 'text-green-600'
+                : ex.professor_load_label === 'Moderate'
+                ? 'text-amber-500'
+                : 'text-red-500'
+            }`}>
+              {ex.professor_load_label}
+            </span>
+            <span className="text-gray-400">({ex.professor_cognitive_score}/100)</span>
+          </div>
         )}
       </div>
     </div>
@@ -638,6 +940,246 @@ function CalendarTab({ data }: { data: { meetings: CalendarMeeting[]; professor_
       <div className="mt-6 flex gap-4 text-xs text-gray-500">
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-indigo-200 border border-indigo-300 inline-block"></span> Student meeting</span>
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-gray-200 border border-gray-300 inline-block"></span> Professor block</span>
+      </div>
+    </div>
+  )
+}
+
+// ── Tickets Tab ────────────────────────────────────────────────────────────────
+
+const TICKET_STATUS_STYLE: Record<string, string> = {
+  OPEN: 'bg-yellow-100 text-yellow-700',
+  IN_PROGRESS: 'bg-blue-100 text-blue-700',
+  RESOLVED: 'bg-green-100 text-green-700',
+}
+
+function TicketsTab({
+  students, tickets,
+  studentId, onStudentChange,
+  transcript, onTranscriptChange,
+  onExtract, extracting,
+  extractedItems, onItemChange, onItemToggleScope, onItemRemove,
+  onSubmit, submitting,
+  onShare, sharingId,
+  onTaResolve, taResolvingId,
+  msg, onClearMsg,
+}: {
+  students: Student[]
+  tickets: Ticket[]
+  studentId: number | null
+  onStudentChange: (id: number | null) => void
+  transcript: string
+  onTranscriptChange: (v: string) => void
+  onExtract: () => void
+  extracting: boolean
+  extractedItems: ActionItem[] | null
+  onItemChange: (idx: number, field: 'title' | 'description', val: string) => void
+  onItemToggleScope: (idx: number) => void
+  onItemRemove: (idx: number) => void
+  onSubmit: () => void
+  submitting: boolean
+  onShare: (id: number) => void
+  sharingId: number | null
+  onTaResolve: (id: number) => void
+  taResolvingId: number | null
+  msg: { type: 'success' | 'error'; text: string } | null
+  onClearMsg: () => void
+}) {
+  const taOnly    = tickets.filter(t => !t.shared_with_professor)
+  const shared    = tickets.filter(t =>  t.shared_with_professor)
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto flex flex-col gap-6">
+
+      {/* Toast */}
+      {msg && (
+        <div className={`rounded-lg px-4 py-3 flex items-center gap-3 text-sm font-medium ${
+          msg.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'
+        }`}>
+          {msg.text}
+          <button onClick={onClearMsg} className="ml-auto text-lg leading-none opacity-60 hover:opacity-100">×</button>
+        </div>
+      )}
+
+      {/* Create ticket from transcript */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 flex flex-col gap-4">
+        <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">New Ticket from Transcript</h2>
+
+        {/* Student selector */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs text-gray-500">Student</label>
+          <select
+            value={studentId ?? ''}
+            onChange={e => onStudentChange(e.target.value ? Number(e.target.value) : null)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          >
+            <option value="">Select a student…</option>
+            {students.map(s => (
+              <option key={s.id} value={s.id}>{s.name} ({s.email})</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Transcript input */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs text-gray-500">Paste meeting transcript</label>
+          <textarea
+            rows={7}
+            value={transcript}
+            onChange={e => onTranscriptChange(e.target.value)}
+            placeholder="Paste the meeting transcript here…"
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-y"
+          />
+        </div>
+
+        <button
+          onClick={onExtract}
+          disabled={extracting || !studentId || !transcript.trim()}
+          className="self-start bg-indigo-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition"
+        >
+          {extracting ? 'Extracting…' : 'Extract Action Items'}
+        </button>
+
+        {/* Extracted items — editable + scope-toggleable before submit */}
+        {extractedItems !== null && extractedItems.length > 0 && (
+          <div className="flex flex-col gap-3 mt-1">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-gray-500 font-medium">
+                {extractedItems.length} item{extractedItems.length !== 1 ? 's' : ''} extracted — review and set who handles each:
+              </p>
+              <p className="text-xs text-gray-400">
+                <span className="inline-block w-2 h-2 rounded-full bg-indigo-400 mr-1" />TA &nbsp;
+                <span className="inline-block w-2 h-2 rounded-full bg-orange-400 mr-1" />Professor
+              </p>
+            </div>
+            {extractedItems.map((item, idx) => (
+              <div
+                key={idx}
+                className={`border rounded-lg p-3 flex flex-col gap-2 ${
+                  item.shared_with_professor
+                    ? 'border-orange-200 bg-orange-50'
+                    : 'border-indigo-100 bg-indigo-50'
+                }`}
+              >
+                <div className="flex items-start gap-2">
+                  {/* Scope toggle pill */}
+                  <button
+                    onClick={() => onItemToggleScope(idx)}
+                    title="Click to toggle who handles this"
+                    className={`shrink-0 text-xs font-semibold px-2 py-0.5 rounded-full border transition ${
+                      item.shared_with_professor
+                        ? 'bg-orange-100 text-orange-700 border-orange-300 hover:bg-orange-200'
+                        : 'bg-indigo-100 text-indigo-700 border-indigo-300 hover:bg-indigo-200'
+                    }`}
+                  >
+                    {item.shared_with_professor ? 'Professor' : 'TA'}
+                  </button>
+                  <input
+                    value={item.title}
+                    onChange={e => onItemChange(idx, 'title', e.target.value)}
+                    className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                    placeholder="Action title"
+                  />
+                  <button
+                    onClick={() => onItemRemove(idx)}
+                    className="text-gray-400 hover:text-red-500 text-lg leading-none mt-0.5 transition"
+                    title="Remove"
+                  >×</button>
+                </div>
+                <textarea
+                  rows={2}
+                  value={item.description}
+                  onChange={e => onItemChange(idx, 'description', e.target.value)}
+                  className="border border-gray-300 rounded px-2 py-1 text-xs text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-400 resize-none bg-white"
+                  placeholder="Description (optional)"
+                />
+              </div>
+            ))}
+            <button
+              onClick={onSubmit}
+              disabled={submitting}
+              className="self-start bg-green-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition"
+            >
+              {submitting ? 'Creating…' : `Create ${extractedItems.length} Ticket${extractedItems.length !== 1 ? 's' : ''}`}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Yours to Handle ── */}
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+          Yours to Handle ({taOnly.length})
+        </h2>
+        {taOnly.length === 0 && (
+          <p className="text-sm text-gray-400">No TA-only tickets.</p>
+        )}
+        {taOnly.map(t => (
+          <div key={t.id} className="bg-white rounded-xl border border-indigo-100 shadow-sm px-5 py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-800 truncate">{t.title}</p>
+                {t.student && <p className="text-xs text-gray-500 mt-0.5">For: {t.student.name}</p>}
+                {t.description && <p className="text-xs text-gray-500 mt-1 line-clamp-2">{t.description}</p>}
+                {t.resolution_note && (
+                  <p className="text-xs text-green-700 mt-1 italic">Note: {t.resolution_note}</p>
+                )}
+              </div>
+              <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${TICKET_STATUS_STYLE[t.status]}`}>
+                {t.status.replace('_', ' ')}
+              </span>
+            </div>
+            {t.status !== 'RESOLVED' && (
+              <div className="flex gap-2 mt-3 pt-3 border-t border-gray-100">
+                <button
+                  onClick={() => onTaResolve(t.id)}
+                  disabled={taResolvingId === t.id}
+                  className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-green-700 disabled:opacity-50 transition"
+                >
+                  {taResolvingId === t.id ? 'Resolving…' : 'Mark Resolved'}
+                </button>
+                <button
+                  onClick={() => onShare(t.id)}
+                  disabled={sharingId === t.id}
+                  className="text-xs bg-orange-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-orange-600 disabled:opacity-50 transition"
+                >
+                  {sharingId === t.id ? 'Sharing…' : 'Share to Professor'}
+                </button>
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-2">{fmt(t.created_at)}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Shared with Professor ── */}
+      <div className="flex flex-col gap-3">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+          Shared with Professor ({shared.length})
+        </h2>
+        {shared.length === 0 && (
+          <p className="text-sm text-gray-400">No tickets shared with the professor yet.</p>
+        )}
+        {shared.map(t => (
+          <div key={t.id} className="bg-white rounded-xl border border-orange-100 shadow-sm px-5 py-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-800 truncate">{t.title}</p>
+                {t.student && <p className="text-xs text-gray-500 mt-0.5">For: {t.student.name}</p>}
+                {t.description && <p className="text-xs text-gray-500 mt-1 line-clamp-2">{t.description}</p>}
+                {t.resolution_note && (
+                  <div className="mt-1 bg-green-50 border border-green-100 rounded px-2 py-1">
+                    <p className="text-xs text-green-700 italic">{t.resolution_note}</p>
+                  </div>
+                )}
+              </div>
+              <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${TICKET_STATUS_STYLE[t.status]}`}>
+                {t.status.replace('_', ' ')}
+              </span>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">{fmt(t.created_at)}</p>
+          </div>
+        ))}
       </div>
     </div>
   )

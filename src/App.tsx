@@ -4,6 +4,7 @@ import JoinPage from './pages/JoinPage'
 import StudentDashboard from './pages/StudentDashboard'
 import TADashboard from './pages/TADashboard'
 import ProfessorDashboard from './pages/ProfessorDashboard'
+import SettingsPage from './pages/SettingsPage'
 import ProtectedRoute from './components/ProtectedRoute'
 
 export default function App() {
@@ -35,6 +36,7 @@ export default function App() {
           </ProtectedRoute>
         }
       />
+      <Route path="/settings" element={<SettingsPage />} />
       <Route path="/" element={<Navigate to="/login" replace />} />
     </Routes>
   )

@@ -43,7 +43,19 @@ interface PendingApprovalItem {
   created_at: string
 }
 
-type Tab = 'calendar' | 'team'
+type Tab = 'calendar' | 'team' | 'tickets'
+
+interface IncomingTicket {
+  id: number
+  title: string
+  description: string | null
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'
+  resolution_note: string | null
+  created_at: string
+  resolved_at: string | null
+  student: { id: number; name: string; email: string } | null
+  ta: { id: number; name: string; email: string } | null
+}
 
 function fmt(iso: string) {
   return new Date(iso).toLocaleString(undefined, {
@@ -70,6 +82,10 @@ export default function ProfessorDashboard() {
   const [inviteMsg, setInviteMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [approvals, setApprovals] = useState<PendingApprovalItem[]>([])
   const [bellOpen, setBellOpen] = useState(false)
+  const [incomingTickets, setIncomingTickets] = useState<IncomingTicket[]>([])
+  const [ticketStatusMap, setTicketStatusMap] = useState<Record<number, 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'>>({})
+  const [ticketNoteMap, setTicketNoteMap] = useState<Record<number, string>>({})
+  const [updatingTicket, setUpdatingTicket] = useState<number | null>(null)
 
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
@@ -84,6 +100,18 @@ export default function ProfessorDashboard() {
   useEffect(() => {
     if (tab === 'team') {
       api.get('/professor/team').then(r => setTeam(r.data))
+    } else if (tab === 'tickets') {
+      api.get('/tickets/incoming').then(r => {
+        setIncomingTickets(r.data)
+        const statusInit: Record<number, 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'> = {}
+        const noteInit: Record<number, string> = {}
+        r.data.forEach((t: IncomingTicket) => {
+          statusInit[t.id] = t.status
+          noteInit[t.id] = t.resolution_note ?? ''
+        })
+        setTicketStatusMap(statusInit)
+        setTicketNoteMap(noteInit)
+      }).catch(() => {})
     }
   }, [tab])
 
@@ -92,8 +120,9 @@ export default function ProfessorDashboard() {
     setPreviewing(true)
     setPreviewError(null)
     setPreviews(null)
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
     try {
-      const res = await api.post('/professor/block/preview', { prompt })
+      const res = await api.post('/professor/block/preview', { prompt, timezone })
       setPreviews(res.data)
     } catch (e: any) {
       setPreviewError(e.response?.data?.detail ?? 'Could not parse prompt')
@@ -105,8 +134,9 @@ export default function ProfessorDashboard() {
   async function confirm() {
     if (!previews) return
     setConfirming(true)
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
     try {
-      const res = await api.post('/professor/block/confirm', { prompt })
+      const res = await api.post('/professor/block/confirm', { prompt, timezone })
       const newBlocks: BlockPreview[] = res.data.created
       setBlocks(prev => [
         ...prev,
@@ -147,6 +177,23 @@ export default function ProfessorDashboard() {
       setApprovals(prev => prev.filter(a => a.id !== id))
     } catch {
       alert(`Failed to ${action} booking`)
+    }
+  }
+
+  async function updateTicket(ticketId: number) {
+    setUpdatingTicket(ticketId)
+    try {
+      const res = await api.patch(`/tickets/${ticketId}/status`, {
+        status: ticketStatusMap[ticketId],
+        resolution_note: ticketNoteMap[ticketId] || null,
+      })
+      setIncomingTickets(prev =>
+        prev.map(t => t.id === ticketId ? { ...t, ...res.data } : t)
+      )
+    } catch {
+      alert('Failed to update ticket')
+    } finally {
+      setUpdatingTicket(null)
     }
   }
 
@@ -230,7 +277,16 @@ export default function ProfessorDashboard() {
           >
             {inviteSending ? 'Sending…' : 'Invite TA'}
           </button>
-          <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition ml-2">
+          <button
+            onClick={() => navigate('/settings')}
+            className="p-2 text-gray-500 hover:text-gray-800 transition"
+            title="Account Settings"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition">
             Sign out
           </button>
         </div>
@@ -308,7 +364,7 @@ export default function ProfessorDashboard() {
 
       {/* Tab bar */}
       <nav className="bg-white border-b border-gray-200 px-6 flex gap-1">
-        {(['calendar', 'team'] as Tab[]).map(t => (
+        {(['calendar', 'team', 'tickets'] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -318,7 +374,16 @@ export default function ProfessorDashboard() {
                 : 'border-transparent text-gray-500 hover:text-gray-800'
             }`}
           >
-            {t === 'calendar' ? 'My Calendar' : 'Team Overview'}
+            {t === 'calendar' ? 'My Calendar' : t === 'team' ? 'Team Overview' : (
+              <span className="flex items-center gap-1.5">
+                Tickets
+                {incomingTickets.filter(tk => tk.status === 'OPEN').length > 0 && (
+                  <span className="bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 leading-none">
+                    {incomingTickets.filter(tk => tk.status === 'OPEN').length}
+                  </span>
+                )}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -354,6 +419,69 @@ export default function ProfessorDashboard() {
                 })),
               ]}
             />
+          )}
+
+          {tab === 'tickets' && (
+            <div className="flex flex-col gap-4">
+              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+                Action Tickets ({incomingTickets.length})
+              </h2>
+              {incomingTickets.length === 0 && (
+                <p className="text-sm text-gray-400">No tickets yet. They appear here when a TA uploads a meeting transcript.</p>
+              )}
+              {incomingTickets.map(ticket => (
+                <div key={ticket.id} className="bg-white rounded-xl border border-gray-200 shadow-sm px-5 py-4 flex flex-col gap-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-gray-800">{ticket.title}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Student: {ticket.student?.name} · TA: {ticket.ta?.name}
+                      </p>
+                      {ticket.description && (
+                        <p className="text-sm text-gray-600 mt-2">{ticket.description}</p>
+                      )}
+                    </div>
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${
+                      ticket.status === 'OPEN' ? 'bg-yellow-100 text-yellow-700' :
+                      ticket.status === 'IN_PROGRESS' ? 'bg-blue-100 text-blue-700' :
+                      'bg-green-100 text-green-700'
+                    }`}>
+                      {ticket.status.replace('_', ' ')}
+                    </span>
+                  </div>
+
+                  {/* Status update controls */}
+                  <div className="flex flex-col gap-2 border-t border-gray-100 pt-3">
+                    <div className="flex items-center gap-3">
+                      <select
+                        value={ticketStatusMap[ticket.id] ?? ticket.status}
+                        onChange={e => setTicketStatusMap(prev => ({ ...prev, [ticket.id]: e.target.value as any }))}
+                        className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      >
+                        <option value="OPEN">Open</option>
+                        <option value="IN_PROGRESS">In Progress</option>
+                        <option value="RESOLVED">Resolved</option>
+                      </select>
+                      <button
+                        onClick={() => updateTicket(ticket.id)}
+                        disabled={updatingTicket === ticket.id}
+                        className="bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition"
+                      >
+                        {updatingTicket === ticket.id ? 'Updating…' : 'Update'}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={ticketNoteMap[ticket.id] ?? ''}
+                      onChange={e => setTicketNoteMap(prev => ({ ...prev, [ticket.id]: e.target.value }))}
+                      placeholder="Resolution note (optional — sent to student and TA)"
+                      className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder-gray-400"
+                    />
+                  </div>
+                  <p className="text-xs text-gray-400">{fmt(ticket.created_at)}</p>
+                </div>
+              ))}
+            </div>
           )}
 
           {tab === 'team' && (
