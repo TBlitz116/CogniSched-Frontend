@@ -20,6 +20,7 @@ interface StudentTicket {
   title: string
   description: string | null
   status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'
+  shared_with_professor: boolean
   resolution_note: string | null
   created_at: string
   resolved_at: string | null
