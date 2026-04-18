@@ -131,6 +131,20 @@ export default function TADashboard() {
   const [inviteSending, setInviteSending] = useState(false)
   const [inviteMsg, setInviteMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  // Decision-card state — the Decision Inbox flow lets a TA convert a request
+  // into an async yes/no for the professor instead of booking a meeting.
+  const [decisionFor, setDecisionFor] = useState<Notification | null>(null)
+  const [decisionDraft, setDecisionDraft] = useState<{
+    question_summary: string
+    context: string
+    ta_recommendation: string
+    options: string[]
+  } | null>(null)
+  const [decisionDrafting, setDecisionDrafting] = useState(false)
+  const [decisionSubmitting, setDecisionSubmitting] = useState(false)
+  const [decisionTaNote, setDecisionTaNote] = useState('')
+  const [decisionError, setDecisionError] = useState<string | null>(null)
+
   // Tickets tab state
   const [myStudents, setMyStudents] = useState<Student[]>([])
   const [tickets, setTickets] = useState<Ticket[]>([])
@@ -242,6 +256,88 @@ export default function TADashboard() {
     await api.post(`/ta/decline/${id}`)
     setNotifications(prev => prev.filter(n => n.id !== id))
     if (selected?.id === id) { setSelected(null); setSuggestions([]) }
+  }
+
+  async function openDecisionModal(n: Notification) {
+    setDecisionFor(n)
+    setDecisionDraft(null)
+    setDecisionTaNote('')
+    setDecisionError(null)
+    setDecisionDrafting(true)
+    try {
+      const res = await api.post('/decisions/draft', { request_id: n.id })
+      setDecisionDraft({
+        question_summary: res.data.question_summary ?? '',
+        context: res.data.context ?? '',
+        ta_recommendation: res.data.ta_recommendation ?? '',
+        options: res.data.options ?? ['Approve', 'Deny', 'Escalate to meeting'],
+      })
+    } catch (e: any) {
+      setDecisionError(e.response?.data?.detail ?? 'Failed to draft decision')
+    } finally {
+      setDecisionDrafting(false)
+    }
+  }
+
+  async function redraftDecision() {
+    if (!decisionFor) return
+    setDecisionDrafting(true)
+    setDecisionError(null)
+    try {
+      const res = await api.post('/decisions/draft', {
+        request_id: decisionFor.id,
+        ta_note: decisionTaNote || null,
+      })
+      setDecisionDraft({
+        question_summary: res.data.question_summary ?? '',
+        context: res.data.context ?? '',
+        ta_recommendation: res.data.ta_recommendation ?? '',
+        options: res.data.options ?? ['Approve', 'Deny', 'Escalate to meeting'],
+      })
+    } catch (e: any) {
+      setDecisionError(e.response?.data?.detail ?? 'Failed to redraft')
+    } finally {
+      setDecisionDrafting(false)
+    }
+  }
+
+  async function submitDecision() {
+    if (!decisionFor || !decisionDraft) return
+    if (!decisionDraft.question_summary.trim()) {
+      setDecisionError('Summary is required')
+      return
+    }
+    if (decisionDraft.options.filter(o => o.trim()).length === 0) {
+      setDecisionError('At least one option is required')
+      return
+    }
+    setDecisionSubmitting(true)
+    setDecisionError(null)
+    try {
+      await api.post('/decisions/create', {
+        request_id: decisionFor.id,
+        question_summary: decisionDraft.question_summary.trim(),
+        context: decisionDraft.context.trim(),
+        ta_recommendation: decisionDraft.ta_recommendation.trim(),
+        options: decisionDraft.options.map(o => o.trim()).filter(Boolean),
+      })
+      const closedId = decisionFor.id
+      setNotifications(prev => prev.filter(n => n.id !== closedId))
+      if (selected?.id === closedId) { setSelected(null); setSuggestions([]) }
+      setDecisionFor(null)
+      setDecisionDraft(null)
+    } catch (e: any) {
+      setDecisionError(e.response?.data?.detail ?? 'Failed to send decision')
+    } finally {
+      setDecisionSubmitting(false)
+    }
+  }
+
+  function closeDecisionModal() {
+    setDecisionFor(null)
+    setDecisionDraft(null)
+    setDecisionError(null)
+    setDecisionTaNote('')
   }
 
   async function sendInvite() {
@@ -430,6 +526,7 @@ export default function TADashboard() {
             onBook={book}
             onBookSoonest={bookSoonest}
             onDecline={decline}
+            onConvertToDecision={openDecisionModal}
             slotPrompt={slotPrompt}
             onSlotPromptChange={setSlotPrompt}
             onSuggestByPrompt={suggestByPrompt}
@@ -441,6 +538,21 @@ export default function TADashboard() {
         {tab === 'calendar' && <CalendarTab data={calendar} />}
         {tab === 'analytics' && (
           <AnalyticsTab scores={cogScores} burnout={burnout} density={density} />
+        )}
+        {decisionFor && (
+          <DecisionDraftModal
+            notification={decisionFor}
+            draft={decisionDraft}
+            drafting={decisionDrafting}
+            submitting={decisionSubmitting}
+            taNote={decisionTaNote}
+            error={decisionError}
+            onTaNoteChange={setDecisionTaNote}
+            onRedraft={redraftDecision}
+            onDraftChange={setDecisionDraft}
+            onSubmit={submitDecision}
+            onClose={closeDecisionModal}
+          />
         )}
         {tab === 'tickets' && (
           <TicketsTab
@@ -481,7 +593,7 @@ function RequestsTab({
   notifications, selected, suggestions, soonestSuggestions,
   loadingSuggestions, loadingSoonest, bookingId,
   slotTab, onSlotTabChange,
-  onSelect, onBook, onBookSoonest, onDecline,
+  onSelect, onBook, onBookSoonest, onDecline, onConvertToDecision,
   slotPrompt, onSlotPromptChange, onSuggestByPrompt, promptLoading, promptReasoning,
   rejectedBookings,
 }: {
@@ -498,6 +610,7 @@ function RequestsTab({
   onBook: (s: Suggestion) => void
   onBookSoonest: (s: Suggestion) => void
   onDecline: (id: number) => void
+  onConvertToDecision: (n: Notification) => void
   slotPrompt: string
   onSlotPromptChange: (v: string) => void
   onSuggestByPrompt: () => void
@@ -554,6 +667,7 @@ function RequestsTab({
           onBook={onBook}
           onBookSoonest={onBookSoonest}
           onDecline={onDecline}
+          onConvertToDecision={onConvertToDecision}
           slotPrompt={slotPrompt}
           onSlotPromptChange={onSlotPromptChange}
           onSuggestByPrompt={onSuggestByPrompt}
@@ -571,7 +685,7 @@ function RequestsTab({
 function SelectedPanel({
   selected, suggestions, soonestSuggestions,
   loadingSuggestions, loadingSoonest, bookingId,
-  slotTab, onSlotTabChange, onBook, onBookSoonest, onDecline,
+  slotTab, onSlotTabChange, onBook, onBookSoonest, onDecline, onConvertToDecision,
   slotPrompt, onSlotPromptChange, onSuggestByPrompt, promptLoading, promptReasoning,
   rejectedBookings,
 }: {
@@ -586,6 +700,7 @@ function SelectedPanel({
   onBook: (s: Suggestion) => void
   onBookSoonest: (s: Suggestion) => void
   onDecline: (id: number) => void
+  onConvertToDecision: (n: Notification) => void
   slotPrompt: string
   onSlotPromptChange: (v: string) => void
   onSuggestByPrompt: () => void
@@ -609,8 +724,18 @@ function SelectedPanel({
             {selected.detected_priority && <PriorityBadge priority={selected.detected_priority} />}
             <span className="text-xs text-gray-500">{selected.student.email}</span>
             <button
+              onClick={() => onConvertToDecision(selected)}
+              className="ml-auto text-xs font-medium text-indigo-600 hover:text-indigo-800 transition inline-flex items-center gap-1"
+              title="Send to professor as an async decision instead of booking a meeting"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              </svg>
+              Convert to Decision
+            </button>
+            <button
               onClick={() => onDecline(selected.id)}
-              className="ml-auto text-xs text-red-400 hover:text-red-600 transition"
+              className="text-xs text-red-400 hover:text-red-600 transition"
             >
               Decline
             </button>
@@ -1241,6 +1366,229 @@ function AnalyticsTab({
             </BarChart>
           </ResponsiveContainer>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Decision Draft Modal ──────────────────────────────────────────────────────
+
+type DecisionDraft = {
+  question_summary: string
+  context: string
+  ta_recommendation: string
+  options: string[]
+}
+
+function DecisionDraftModal({
+  notification, draft, drafting, submitting, taNote, error,
+  onTaNoteChange, onRedraft, onDraftChange, onSubmit, onClose,
+}: {
+  notification: Notification
+  draft: DecisionDraft | null
+  drafting: boolean
+  submitting: boolean
+  taNote: string
+  error: string | null
+  onTaNoteChange: (v: string) => void
+  onRedraft: () => void
+  onDraftChange: (d: DecisionDraft | null) => void
+  onSubmit: () => void
+  onClose: () => void
+}) {
+  function updateField<K extends keyof DecisionDraft>(key: K, value: DecisionDraft[K]) {
+    if (!draft) return
+    onDraftChange({ ...draft, [key]: value })
+  }
+  function updateOption(idx: number, value: string) {
+    if (!draft) return
+    onDraftChange({ ...draft, options: draft.options.map((o, i) => i === idx ? value : o) })
+  }
+  function removeOption(idx: number) {
+    if (!draft) return
+    onDraftChange({ ...draft, options: draft.options.filter((_, i) => i !== idx) })
+  }
+  function addOption() {
+    if (!draft) return
+    onDraftChange({ ...draft, options: [...draft.options, ''] })
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-gray-200 flex items-start justify-between shrink-0">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Convert to Decision</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Send this to the professor as an async yes/no instead of booking a meeting.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-700 text-2xl leading-none"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          {/* Original request */}
+          <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 mb-5">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+              Original request from {notification.student.name}
+            </p>
+            <p className="text-sm text-gray-800">{notification.prompt_text}</p>
+          </div>
+
+          {/* Drafting state */}
+          {drafting && (
+            <div className="flex items-center gap-3 py-8 justify-center">
+              <div className="h-2 w-2 rounded-full bg-indigo-400 animate-bounce" />
+              <div className="h-2 w-2 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: '0.15s' }} />
+              <div className="h-2 w-2 rounded-full bg-indigo-400 animate-bounce" style={{ animationDelay: '0.3s' }} />
+              <span className="text-sm text-gray-500 ml-2">Gemini drafting decision card…</span>
+            </div>
+          )}
+
+          {/* Draft form */}
+          {!drafting && draft && (
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Question for professor
+                </label>
+                <input
+                  type="text"
+                  value={draft.question_summary}
+                  onChange={e => updateField('question_summary', e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  placeholder="One-sentence summary of the ask"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Context
+                </label>
+                <textarea
+                  value={draft.context}
+                  onChange={e => updateField('context', e.target.value)}
+                  rows={3}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  placeholder="Background the professor needs to decide"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Your recommendation
+                </label>
+                <textarea
+                  value={draft.ta_recommendation}
+                  onChange={e => updateField('ta_recommendation', e.target.value)}
+                  rows={2}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  placeholder="What you think they should do + why"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    Options the professor will see
+                  </label>
+                  <button
+                    type="button"
+                    onClick={addOption}
+                    disabled={draft.options.length >= 4}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 disabled:opacity-40"
+                  >
+                    + Add option
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {draft.options.map((opt, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={opt}
+                        onChange={e => updateOption(idx, e.target.value)}
+                        className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        placeholder="e.g. Approve 2-day extension"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeOption(idx)}
+                        disabled={draft.options.length <= 1}
+                        className="text-gray-400 hover:text-red-500 disabled:opacity-30 text-lg leading-none px-2"
+                        aria-label="Remove option"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* TA note + redraft — secondary affordance */}
+              <div className="pt-2 border-t border-gray-100">
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                  Not quite right? Add context and redraft
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={taNote}
+                    onChange={e => onTaNoteChange(e.target.value)}
+                    placeholder="e.g. Student has a documented accommodation"
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={onRedraft}
+                    disabled={drafting}
+                    className="px-3 py-2 text-sm font-medium text-indigo-600 border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
+                  >
+                    Redraft
+                  </button>
+                </div>
+              </div>
+
+              {error && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                  {error}
+                </p>
+              )}
+            </div>
+          )}
+
+          {!drafting && !draft && error && (
+            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              {error}
+            </p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-2 shrink-0">
+          <button
+            onClick={onClose}
+            disabled={submitting}
+            className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onSubmit}
+            disabled={submitting || drafting || !draft}
+            className="px-4 py-2 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {submitting ? 'Sending…' : 'Send to Professor'}
+          </button>
+        </div>
       </div>
     </div>
   )
