@@ -43,7 +43,24 @@ interface PendingApprovalItem {
   created_at: string
 }
 
-type Tab = 'calendar' | 'team' | 'tickets'
+type Tab = 'calendar' | 'team' | 'tickets' | 'decisions'
+
+interface DecisionCard {
+  id: number
+  request_id: number | null
+  question_summary: string
+  context: string
+  ta_recommendation: string
+  options: string[]
+  status: 'PENDING' | 'RESOLVED'
+  outcome: string | null
+  chosen_option: string | null
+  professor_note: string | null
+  created_at: string
+  resolved_at: string | null
+  student: { id: number; name: string; email: string } | null
+  ta: { id: number; name: string; email: string } | null
+}
 
 interface IncomingTicket {
   id: number
@@ -87,6 +104,12 @@ export default function ProfessorDashboard() {
   const [ticketNoteMap, setTicketNoteMap] = useState<Record<number, string>>({})
   const [updatingTicket, setUpdatingTicket] = useState<number | null>(null)
 
+  // Decision Inbox state
+  const [decisions, setDecisions] = useState<DecisionCard[]>([])
+  const [resolvedToday, setResolvedToday] = useState(0)
+  const [resolvingDecisionId, setResolvingDecisionId] = useState<number | null>(null)
+  const [decisionNoteMap, setDecisionNoteMap] = useState<Record<number, string>>({})
+
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
     api.get('/professor/calendar').then(r => {
@@ -95,11 +118,22 @@ export default function ProfessorDashboard() {
     })
     api.get('/professor/google-calendar').then(r => setGoogleEvents(r.data)).catch(() => {})
     api.get('/professor/pending-approvals').then(r => setApprovals(r.data)).catch(() => {})
+    // Always prefetch pending decisions so the tab badge is accurate from page load
+    api.get('/decisions/inbox').then(r => setDecisions(r.data)).catch(() => {})
   }, [])
 
   useEffect(() => {
     if (tab === 'team') {
       api.get('/professor/team').then(r => setTeam(r.data))
+    } else if (tab === 'decisions') {
+      api.get('/decisions/inbox').then(r => setDecisions(r.data)).catch(() => {})
+      api.get('/decisions/history').then(r => {
+        const today = new Date().toDateString()
+        const count = (r.data as DecisionCard[]).filter(d =>
+          d.resolved_at && new Date(d.resolved_at).toDateString() === today
+        ).length
+        setResolvedToday(count)
+      }).catch(() => {})
     } else if (tab === 'tickets') {
       api.get('/tickets/incoming').then(r => {
         setIncomingTickets(r.data)
@@ -178,6 +212,40 @@ export default function ProfessorDashboard() {
     } catch {
       alert(`Failed to ${action} booking`)
     }
+  }
+
+  async function resolveDecision(
+    card: DecisionCard,
+    outcome: 'APPROVED' | 'DENIED' | 'ESCALATED_TO_MEETING' | 'NEEDS_MORE_INFO',
+    chosenOption: string | null,
+  ) {
+    setResolvingDecisionId(card.id)
+    try {
+      await api.post(`/decisions/${card.id}/resolve`, {
+        outcome,
+        chosen_option: chosenOption,
+        professor_note: decisionNoteMap[card.id] || null,
+      })
+      setDecisions(prev => prev.filter(d => d.id !== card.id))
+      setResolvedToday(n => n + 1)
+      setDecisionNoteMap(prev => {
+        const next = { ...prev }; delete next[card.id]; return next
+      })
+    } catch {
+      alert('Failed to resolve decision')
+    } finally {
+      setResolvingDecisionId(null)
+    }
+  }
+
+  // Heuristic: map an option label to a structured outcome so the backend can track
+  // approvals/denials separately for analytics. The label itself is also stored.
+  function outcomeFromOption(option: string): 'APPROVED' | 'DENIED' | 'ESCALATED_TO_MEETING' | 'NEEDS_MORE_INFO' {
+    const lower = option.toLowerCase()
+    if (lower.includes('meeting') || lower.includes('discuss') || lower.includes('escalate')) return 'ESCALATED_TO_MEETING'
+    if (lower.includes('more info') || lower.includes('info') || lower.includes('clarify')) return 'NEEDS_MORE_INFO'
+    if (lower.includes('deny') || lower.includes('reject') || lower.includes('decline') || lower.startsWith('no')) return 'DENIED'
+    return 'APPROVED'
   }
 
   async function updateTicket(ticketId: number) {
@@ -364,7 +432,7 @@ export default function ProfessorDashboard() {
 
       {/* Tab bar */}
       <nav className="bg-white border-b border-gray-200 px-6 flex gap-1">
-        {(['calendar', 'team', 'tickets'] as Tab[]).map(t => (
+        {(['calendar', 'team', 'decisions', 'tickets'] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -374,7 +442,18 @@ export default function ProfessorDashboard() {
                 : 'border-transparent text-gray-500 hover:text-gray-800'
             }`}
           >
-            {t === 'calendar' ? 'My Calendar' : t === 'team' ? 'Team Overview' : (
+            {t === 'calendar' ? 'My Calendar' :
+             t === 'team' ? 'Team Overview' :
+             t === 'decisions' ? (
+              <span className="flex items-center gap-1.5">
+                Decision Inbox
+                {decisions.length > 0 && (
+                  <span className="bg-indigo-600 text-white text-xs rounded-full px-1.5 py-0.5 leading-none">
+                    {decisions.length}
+                  </span>
+                )}
+              </span>
+            ) : (
               <span className="flex items-center gap-1.5">
                 Tickets
                 {incomingTickets.filter(tk => tk.status === 'OPEN').length > 0 && (
@@ -419,6 +498,112 @@ export default function ProfessorDashboard() {
                 })),
               ]}
             />
+          )}
+
+          {tab === 'decisions' && (
+            <div className="flex flex-col gap-4">
+              {/* Header summary */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+                    Decision Inbox
+                  </h2>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    Async yes/no decisions your TAs have routed here instead of booking meetings.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 text-right">
+                  <div>
+                    <p className="text-xs text-gray-400">Waiting on you</p>
+                    <p className="text-2xl font-bold text-indigo-600 leading-none">{decisions.length}</p>
+                  </div>
+                  <div className="h-10 border-l border-gray-200" />
+                  <div>
+                    <p className="text-xs text-gray-400">Cleared today</p>
+                    <p className="text-2xl font-bold text-green-600 leading-none">{resolvedToday}</p>
+                  </div>
+                </div>
+              </div>
+
+              {decisions.length === 0 && (
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-12 text-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 mx-auto text-gray-300 mb-3" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  <p className="text-sm text-gray-500 font-medium">Inbox zero</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    When your TAs convert a meeting request into a decision, it shows up here.
+                  </p>
+                </div>
+              )}
+
+              {decisions.map((card, idx) => (
+                <div key={card.id} className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-5 flex flex-col gap-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-gray-400 mb-1">
+                        {idx + 1} of {decisions.length} · from {card.student?.name ?? 'Unknown'}
+                        {card.ta && <> · routed by {card.ta.name}</>}
+                      </p>
+                      <p className="text-base font-semibold text-gray-900 leading-snug">
+                        {card.question_summary}
+                      </p>
+                    </div>
+                    <span className="text-xs text-gray-400 shrink-0">{fmt(card.created_at)}</span>
+                  </div>
+
+                  {card.context && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Context</p>
+                      <p className="text-sm text-gray-700 whitespace-pre-wrap">{card.context}</p>
+                    </div>
+                  )}
+
+                  {card.ta_recommendation && (
+                    <div className="bg-indigo-50 border border-indigo-100 rounded-lg px-4 py-3">
+                      <p className="text-xs font-semibold text-indigo-700 uppercase tracking-wide mb-1">
+                        TA recommendation
+                      </p>
+                      <p className="text-sm text-indigo-900">{card.ta_recommendation}</p>
+                    </div>
+                  )}
+
+                  <input
+                    type="text"
+                    value={decisionNoteMap[card.id] ?? ''}
+                    onChange={e => setDecisionNoteMap(prev => ({ ...prev, [card.id]: e.target.value }))}
+                    placeholder="Optional note to student + TA"
+                    className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder-gray-400"
+                  />
+
+                  <div className="flex flex-wrap gap-2 pt-1 border-t border-gray-100">
+                    {card.options.map(opt => {
+                      const outcome = outcomeFromOption(opt)
+                      const isEscalate = outcome === 'ESCALATED_TO_MEETING'
+                      const isDeny = outcome === 'DENIED'
+                      const isInfo = outcome === 'NEEDS_MORE_INFO'
+                      const cls = isEscalate
+                        ? 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                        : isDeny
+                        ? 'bg-red-600 text-white border-red-600 hover:bg-red-700'
+                        : isInfo
+                        ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                        : 'bg-green-600 text-white border-green-600 hover:bg-green-700'
+                      return (
+                        <button
+                          key={opt}
+                          disabled={resolvingDecisionId === card.id}
+                          onClick={() => resolveDecision(card, outcome, opt)}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium border transition disabled:opacity-50 ${cls}`}
+                        >
+                          {opt}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
 
           {tab === 'tickets' && (
