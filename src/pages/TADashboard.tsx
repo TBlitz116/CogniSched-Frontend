@@ -632,7 +632,7 @@ function RequestsTab({
   slotTab, onSlotTabChange,
   onSelect, onBook, onBookSoonest, onDecline, onConvertToDecision,
   slotPrompt, onSlotPromptChange, onSuggestByPrompt, promptLoading, promptReasoning,
-  rejectedBookings, historyRec, loadingHistory, useSimple, onToggleSimple,
+  rejectedBookings, historyRec, historyData, loadingHistory, useSimple, onToggleSimple,
 }: {
   notifications: Notification[]
   selected: Notification | null
