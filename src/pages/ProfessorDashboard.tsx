@@ -106,6 +106,8 @@ export default function ProfessorDashboard() {
   const [initiatingMeetingFor, setInitiatingMeetingFor] = useState<number | null>(null)
   const [meetingInitiatedFor, setMeetingInitiatedFor] = useState<Set<number>>(new Set())
 
+  const [myLoad, setMyLoad] = useState<{ score: number; label: string; block_count: number; blocked_hours: number } | null>(null)
+
   // Decision Inbox state
   const [decisions, setDecisions] = useState<DecisionCard[]>([])
   const [resolvedToday, setResolvedToday] = useState(0)
@@ -120,6 +122,7 @@ export default function ProfessorDashboard() {
     })
     api.get('/professor/google-calendar').then(r => setGoogleEvents(r.data)).catch(() => {})
     api.get('/professor/pending-approvals').then(r => setApprovals(r.data)).catch(() => {})
+    api.get('/professor/my-load').then(r => setMyLoad(r.data.today)).catch(() => {})
     // Always prefetch pending decisions so the tab badge is accurate from page load
     api.get('/decisions/inbox').then(r => setDecisions(r.data)).catch(() => {})
   }, [])
@@ -187,6 +190,8 @@ export default function ProfessorDashboard() {
       ])
       setPrompt('')
       setPreviews(null)
+      // Refresh cognitive load since new blocks were added
+      api.get('/professor/my-load').then(r => setMyLoad(r.data.today)).catch(() => {})
     } finally {
       setConfirming(false)
     }
@@ -291,9 +296,26 @@ export default function ProfessorDashboard() {
     <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">Scheduler</h1>
-          {user && <p className="text-xs text-gray-500">{user.name} · Professor</p>}
+        <div className="flex items-center gap-3">
+          <div>
+            <h1 className="text-lg font-semibold text-gray-900">Scheduler</h1>
+            {user && <p className="text-xs text-gray-500">{user.name} · Professor</p>}
+          </div>
+          {myLoad && (
+            <div className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border ${
+              myLoad.label === 'Light'
+                ? 'bg-green-50 text-green-700 border-green-200'
+                : myLoad.label === 'Moderate'
+                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                : 'bg-red-50 text-red-700 border-red-200'
+            }`} title={`Today: ${myLoad.block_count} block${myLoad.block_count !== 1 ? 's' : ''}, ${myLoad.blocked_hours}h blocked`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                myLoad.label === 'Light' ? 'bg-green-500' :
+                myLoad.label === 'Moderate' ? 'bg-amber-500' : 'bg-red-500'
+              }`} />
+              {myLoad.label} load · {myLoad.score.toFixed(0)}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* Notification bell */}
