@@ -89,6 +89,16 @@ interface CognitiveDay {
 
 interface DensityPoint { hour: number; count: number }
 
+interface StudentHistory {
+  student: { id: number; name: string }
+  booked_meeting_count: number
+  past_requests: { priority: number; topic: string; status: string; created_at: string }[]
+  past_tickets: { title: string; shared_with_professor: boolean; status: string }[]
+  past_decisions: { question: string; outcome: string | null }[]
+  recommendation: string
+  reasoning: string
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function fmt(iso: string) {
@@ -118,10 +128,14 @@ export default function TADashboard() {
   const [slotPrompt, setSlotPrompt] = useState('')
   const [promptLoading, setPromptLoading] = useState(false)
   const [promptReasoning, setPromptReasoning] = useState<string | null>(null)
-  const [slotTab, setSlotTab] = useState<'recommended' | 'soonest'>('recommended')
+  const [slotTab, setSlotTab] = useState<'recommended' | 'soonest' | 'history'>('recommended')
   const [soonestSuggestions, setSoonestSuggestions] = useState<Suggestion[]>([])
   const [loadingSoonest, setLoadingSoonest] = useState(false)
   const [rejectedBookings, setRejectedBookings] = useState<any[]>([])
+  const [historyRec, setHistoryRec] = useState<{ recommendation: string; reasoning: string } | null>(null)
+  const [historyData, setHistoryData] = useState<StudentHistory | null>(null)
+  const [loadingHistory, setLoadingHistory] = useState(false)
+  const [useSimple, setUseSimple] = useState(false)
 
   const [calendar, setCalendar] = useState<{ meetings: CalendarMeeting[]; professor_blocks: ProfessorBlock[] } | null>(null)
   const [cogScores, setCogScores] = useState<CognitiveDay[]>([])
@@ -183,8 +197,12 @@ export default function TADashboard() {
     setSuggestions([])
     setSoonestSuggestions([])
     setSlotTab('recommended')
+    setHistoryRec(null)
+    setHistoryData(null)
+    setUseSimple(false)
     setLoadingSuggestions(true)
     setLoadingSoonest(true)
+    setLoadingHistory(true)
     try {
       const [recRes, soonRes] = await Promise.all([
         api.get(`/ta/suggestions/${n.id}`),
@@ -195,6 +213,17 @@ export default function TADashboard() {
     } finally {
       setLoadingSuggestions(false)
       setLoadingSoonest(false)
+    }
+    // Fetch history independently so slot cards appear first
+    try {
+      const histRes = await api.get(`/ta/student-history/${n.student.id}`)
+      setHistoryRec({ recommendation: histRes.data.recommendation, reasoning: histRes.data.reasoning })
+      setHistoryData(histRes.data)
+      setUseSimple(histRes.data.recommendation === 'SIMPLE_MEETING')
+    } catch {
+      // History is best-effort — don't block booking if it fails
+    } finally {
+      setLoadingHistory(false)
     }
   }
 
@@ -216,7 +245,7 @@ export default function TADashboard() {
     }
   }
 
-  async function book(suggestion: Suggestion) {
+  async function book(suggestion: Suggestion, simple: boolean) {
     if (!selected) return
     setBookingId(suggestion.slot)
     try {
@@ -224,11 +253,14 @@ export default function TADashboard() {
         request_id: selected.id,
         start_time: suggestion.slot.replace('Z', ''),
         end_time: new Date(new Date(suggestion.slot).getTime() + suggestion.duration_minutes * 60000).toISOString().replace('Z', ''),
+        simple,
       })
       setNotifications(prev => prev.filter(n => n.id !== selected.id))
       setSelected(null)
       setSuggestions([])
       setSoonestSuggestions([])
+      setHistoryRec(null)
+      setHistoryData(null)
     } finally {
       setBookingId(null)
     }
@@ -533,6 +565,11 @@ export default function TADashboard() {
             promptLoading={promptLoading}
             promptReasoning={promptReasoning}
             rejectedBookings={rejectedBookings}
+            historyRec={historyRec}
+            historyData={historyData}
+            loadingHistory={loadingHistory}
+            useSimple={useSimple}
+            onToggleSimple={setUseSimple}
           />
         )}
         {tab === 'calendar' && <CalendarTab data={calendar} />}
@@ -595,7 +632,7 @@ function RequestsTab({
   slotTab, onSlotTabChange,
   onSelect, onBook, onBookSoonest, onDecline, onConvertToDecision,
   slotPrompt, onSlotPromptChange, onSuggestByPrompt, promptLoading, promptReasoning,
-  rejectedBookings,
+  rejectedBookings, historyRec, loadingHistory, useSimple, onToggleSimple,
 }: {
   notifications: Notification[]
   selected: Notification | null
@@ -604,10 +641,10 @@ function RequestsTab({
   loadingSuggestions: boolean
   loadingSoonest: boolean
   bookingId: string | null
-  slotTab: 'recommended' | 'soonest'
-  onSlotTabChange: (t: 'recommended' | 'soonest') => void
+  slotTab: 'recommended' | 'soonest' | 'history'
+  onSlotTabChange: (t: 'recommended' | 'soonest' | 'history') => void
   onSelect: (n: Notification) => void
-  onBook: (s: Suggestion) => void
+  onBook: (s: Suggestion, simple: boolean) => void
   onBookSoonest: (s: Suggestion) => void
   onDecline: (id: number) => void
   onConvertToDecision: (n: Notification) => void
@@ -617,6 +654,11 @@ function RequestsTab({
   promptLoading: boolean
   promptReasoning: string | null
   rejectedBookings: any[]
+  historyRec: { recommendation: string; reasoning: string } | null
+  historyData: StudentHistory | null
+  loadingHistory: boolean
+  useSimple: boolean
+  onToggleSimple: (v: boolean) => void
 }) {
   return (
     <div className="flex h-full">
@@ -674,6 +716,11 @@ function RequestsTab({
           promptLoading={promptLoading}
           promptReasoning={promptReasoning}
           rejectedBookings={rejectedBookings}
+          historyRec={historyRec}
+          historyData={historyData}
+          loadingHistory={loadingHistory}
+          useSimple={useSimple}
+          onToggleSimple={onToggleSimple}
         />}
       </div>
     </div>
@@ -687,7 +734,7 @@ function SelectedPanel({
   loadingSuggestions, loadingSoonest, bookingId,
   slotTab, onSlotTabChange, onBook, onBookSoonest, onDecline, onConvertToDecision,
   slotPrompt, onSlotPromptChange, onSuggestByPrompt, promptLoading, promptReasoning,
-  rejectedBookings,
+  rejectedBookings, historyRec, historyData, loadingHistory, useSimple, onToggleSimple,
 }: {
   selected: Notification
   suggestions: Suggestion[]
@@ -695,9 +742,9 @@ function SelectedPanel({
   loadingSuggestions: boolean
   loadingSoonest: boolean
   bookingId: string | null
-  slotTab: 'recommended' | 'soonest'
-  onSlotTabChange: (t: 'recommended' | 'soonest') => void
-  onBook: (s: Suggestion) => void
+  slotTab: 'recommended' | 'soonest' | 'history'
+  onSlotTabChange: (t: 'recommended' | 'soonest' | 'history') => void
+  onBook: (s: Suggestion, simple: boolean) => void
   onBookSoonest: (s: Suggestion) => void
   onDecline: (id: number) => void
   onConvertToDecision: (n: Notification) => void
@@ -707,6 +754,11 @@ function SelectedPanel({
   promptLoading: boolean
   promptReasoning: string | null
   rejectedBookings: any[]
+  historyRec: { recommendation: string; reasoning: string } | null
+  historyData: StudentHistory | null
+  loadingHistory: boolean
+  useSimple: boolean
+  onToggleSimple: (v: boolean) => void
 }) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -753,7 +805,7 @@ function SelectedPanel({
 
           {/* Slot tab switcher */}
           <div className="flex gap-1">
-            {(['recommended', 'soonest'] as const).map(t => (
+            {(['recommended', 'soonest', 'history'] as const).map(t => (
               <button
                 key={t}
                 onClick={() => onSlotTabChange(t)}
@@ -763,10 +815,50 @@ function SelectedPanel({
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {t}
+                {t === 'history' ? (
+                  <span className="flex items-center gap-1">
+                    History
+                    {loadingHistory && <span className="w-1.5 h-1.5 bg-indigo-300 rounded-full animate-pulse" />}
+                  </span>
+                ) : t}
               </button>
             ))}
           </div>
+
+          {/* AI meeting type recommendation */}
+          {loadingHistory && (
+            <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+              <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce [animation-delay:0ms]" />
+              <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce [animation-delay:150ms]" />
+              <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce [animation-delay:300ms]" />
+              <span className="ml-1">Analyzing student history…</span>
+            </div>
+          )}
+          {!loadingHistory && historyRec && (
+            <div className={`flex items-start justify-between gap-3 rounded-lg px-4 py-3 border ${
+              historyRec.recommendation === 'SIMPLE_MEETING'
+                ? 'bg-teal-50 border-teal-200'
+                : 'bg-indigo-50 border-indigo-200'
+            }`}>
+              <div className="flex flex-col gap-0.5">
+                <p className={`text-xs font-semibold ${historyRec.recommendation === 'SIMPLE_MEETING' ? 'text-teal-700' : 'text-indigo-700'}`}>
+                  AI Recommendation: {historyRec.recommendation === 'SIMPLE_MEETING' ? 'Simple Meeting (TA only)' : 'Full Meeting (with professor)'}
+                </p>
+                <p className="text-xs text-gray-500">{historyRec.reasoning}</p>
+              </div>
+              {/* Toggle override */}
+              <button
+                onClick={() => onToggleSimple(!useSimple)}
+                className={`shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg border transition ${
+                  useSimple
+                    ? 'bg-teal-600 text-white border-teal-600 hover:bg-teal-700'
+                    : 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                }`}
+              >
+                {useSimple ? 'TA only' : 'With professor'}
+              </button>
+            </div>
+          )}
 
           {slotTab === 'soonest' && (
             <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -797,7 +889,13 @@ function SelectedPanel({
                 <p className="text-sm text-gray-400">No available slots found in the priority window.</p>
               )}
               {suggestions.map(s => (
-                <SlotCard key={s.slot} suggestion={s} isBooking={bookingId === s.slot} onBook={() => onBook(s)} />
+                <SlotCard
+                  key={s.slot}
+                  suggestion={s}
+                  isBooking={bookingId === s.slot}
+                  onBook={() => onBook(s, useSimple)}
+                  buttonLabel={useSimple ? 'Book (TA only)' : 'Confirm'}
+                />
               ))}
             </>
           )}
@@ -812,6 +910,10 @@ function SelectedPanel({
                 <SlotCard key={s.slot} suggestion={s} isBooking={bookingId === s.slot} onBook={() => onBookSoonest(s)} buttonLabel="Request Approval" />
               ))}
             </>
+          )}
+
+          {slotTab === 'history' && (
+            <StudentHistoryPanel historyData={historyData} loading={loadingHistory} />
           )}
 
           {/* AI reasoning bubble — appears after prompt results */}
@@ -844,8 +946,8 @@ function SelectedPanel({
         </div>
       </div>
 
-      {/* Chat prompt bar — fixed bottom */}
-      <div className="shrink-0 border-t border-gray-200 bg-white px-6 py-4">
+      {/* Chat prompt bar — hidden on history tab */}
+      <div className={`shrink-0 border-t border-gray-200 bg-white px-6 py-4 ${slotTab === 'history' ? 'hidden' : ''}`}>
         <div className="max-w-2xl mx-auto">
           <ChatPromptBar
             value={slotPrompt}
@@ -1004,6 +1106,136 @@ function SlotCard({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Student History Panel ──────────────────────────────────────────────────────
+
+const PRIORITY_COLORS: Record<number, string> = {
+  1: 'bg-red-100 text-red-700',
+  2: 'bg-orange-100 text-orange-700',
+  3: 'bg-yellow-100 text-yellow-700',
+  4: 'bg-gray-100 text-gray-600',
+}
+
+const OUTCOME_COLORS: Record<string, string> = {
+  APPROVED: 'text-green-600',
+  DENIED: 'text-red-500',
+  ESCALATED_TO_MEETING: 'text-indigo-600',
+  NEEDS_MORE_INFO: 'text-amber-600',
+}
+
+function StudentHistoryPanel({ historyData, loading }: { historyData: StudentHistory | null; loading: boolean }) {
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="bg-gray-50 rounded-xl border border-gray-200 px-5 py-8 flex items-center justify-center gap-3 text-sm text-gray-400">
+          <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce [animation-delay:0ms]" />
+          <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce [animation-delay:150ms]" />
+          <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce [animation-delay:300ms]" />
+          <span className="ml-1">Analyzing history…</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (!historyData) {
+    return <p className="text-sm text-gray-400">No history available.</p>
+  }
+
+  const totalRequests = historyData.past_requests.length
+  const escalatedTickets = historyData.past_tickets.filter(t => t.shared_with_professor).length
+  const resolvedTickets = historyData.past_tickets.filter(t => t.status === 'RESOLVED').length
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Summary stats */}
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { label: 'Meetings booked', value: historyData.booked_meeting_count },
+          { label: 'Requests made', value: totalRequests },
+          { label: 'Tickets escalated', value: escalatedTickets },
+        ].map(s => (
+          <div key={s.label} className="bg-white rounded-xl border border-gray-200 px-4 py-3 text-center">
+            <p className="text-2xl font-bold text-gray-800">{s.value}</p>
+            <p className="text-xs text-gray-500 mt-0.5">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Past requests */}
+      {historyData.past_requests.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Past Requests</p>
+          {historyData.past_requests.map((r, i) => (
+            <div key={i} className="bg-white rounded-lg border border-gray-200 px-4 py-2.5 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`text-xs font-semibold px-1.5 py-0.5 rounded shrink-0 ${PRIORITY_COLORS[r.priority] ?? 'bg-gray-100 text-gray-600'}`}>
+                  P{r.priority}
+                </span>
+                <span className="text-xs text-gray-700 truncate">{r.topic.replace('_', ' ')}</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className={`text-xs font-medium ${
+                  r.status === 'SCHEDULED' ? 'text-green-600' :
+                  r.status === 'DECLINED' ? 'text-red-500' : 'text-yellow-600'
+                }`}>{r.status}</span>
+                <span className="text-xs text-gray-400">{r.created_at}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Tickets */}
+      {historyData.past_tickets.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Action Tickets ({resolvedTickets}/{historyData.past_tickets.length} resolved)
+          </p>
+          {historyData.past_tickets.map((t, i) => (
+            <div key={i} className="bg-white rounded-lg border border-gray-200 px-4 py-2.5 flex items-center justify-between gap-3">
+              <p className="text-xs text-gray-700 flex-1 truncate">{t.title}</p>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+                  t.shared_with_professor ? 'bg-orange-100 text-orange-700' : 'bg-indigo-50 text-indigo-600'
+                }`}>
+                  {t.shared_with_professor ? 'Professor' : 'TA'}
+                </span>
+                <span className={`text-xs font-medium ${
+                  t.status === 'RESOLVED' ? 'text-green-600' :
+                  t.status === 'IN_PROGRESS' ? 'text-blue-500' : 'text-yellow-600'
+                }`}>{t.status.replace('_', ' ')}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Decisions */}
+      {historyData.past_decisions.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Decision Cards</p>
+          {historyData.past_decisions.map((d, i) => (
+            <div key={i} className="bg-white rounded-lg border border-gray-200 px-4 py-2.5 flex items-start justify-between gap-3">
+              <p className="text-xs text-gray-700 flex-1">{d.question}</p>
+              {d.outcome && (
+                <span className={`text-xs font-semibold shrink-0 ${OUTCOME_COLORS[d.outcome] ?? 'text-gray-500'}`}>
+                  {d.outcome.replace(/_/g, ' ')}
+                </span>
+              )}
+              {!d.outcome && (
+                <span className="text-xs text-gray-400 shrink-0">Pending</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {totalRequests === 0 && historyData.past_tickets.length === 0 && historyData.past_decisions.length === 0 && (
+        <p className="text-sm text-gray-400 text-center py-6">No prior interactions with this student.</p>
+      )}
     </div>
   )
 }
