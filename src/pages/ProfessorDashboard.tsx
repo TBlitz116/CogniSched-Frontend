@@ -103,6 +103,8 @@ export default function ProfessorDashboard() {
   const [ticketStatusMap, setTicketStatusMap] = useState<Record<number, 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'>>({})
   const [ticketNoteMap, setTicketNoteMap] = useState<Record<number, string>>({})
   const [updatingTicket, setUpdatingTicket] = useState<number | null>(null)
+  const [initiatingMeetingFor, setInitiatingMeetingFor] = useState<number | null>(null)
+  const [meetingInitiatedFor, setMeetingInitiatedFor] = useState<Set<number>>(new Set())
 
   // Decision Inbox state
   const [decisions, setDecisions] = useState<DecisionCard[]>([])
@@ -246,6 +248,24 @@ export default function ProfessorDashboard() {
     if (lower.includes('more info') || lower.includes('info') || lower.includes('clarify')) return 'NEEDS_MORE_INFO'
     if (lower.includes('deny') || lower.includes('reject') || lower.includes('decline') || lower.startsWith('no')) return 'DENIED'
     return 'APPROVED'
+  }
+
+  async function initiateMeeting(ticket: IncomingTicket) {
+    if (!ticket.student || !ticket.ta) return
+    setInitiatingMeetingFor(ticket.id)
+    try {
+      await api.post('/professor/initiate-meeting', {
+        student_id: ticket.student.id,
+        ta_id: ticket.ta.id,
+        reason: `${ticket.title}${ticket.description ? ': ' + ticket.description : ''}`,
+        ticket_id: ticket.id,
+      })
+      setMeetingInitiatedFor(prev => new Set(prev).add(ticket.id))
+    } catch {
+      alert('Failed to initiate meeting request')
+    } finally {
+      setInitiatingMeetingFor(null)
+    }
   }
 
   async function updateTicket(ticketId: number) {
@@ -663,7 +683,24 @@ export default function ProfessorDashboard() {
                       className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder-gray-400"
                     />
                   </div>
-                  <p className="text-xs text-gray-400">{fmt(ticket.created_at)}</p>
+                  <div className="flex items-center justify-between pt-1">
+                    <p className="text-xs text-gray-400">{fmt(ticket.created_at)}</p>
+                    {ticket.student && ticket.ta && (
+                      meetingInitiatedFor.has(ticket.id) ? (
+                        <span className="text-xs font-medium text-green-600 bg-green-50 border border-green-200 rounded-lg px-3 py-1">
+                          Meeting requested
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => initiateMeeting(ticket)}
+                          disabled={initiatingMeetingFor === ticket.id}
+                          className="text-xs font-medium text-orange-700 bg-orange-50 border border-orange-200 rounded-lg px-3 py-1 hover:bg-orange-100 disabled:opacity-50 transition"
+                        >
+                          {initiatingMeetingFor === ticket.id ? 'Requesting…' : 'Request Meeting'}
+                        </button>
+                      )
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
