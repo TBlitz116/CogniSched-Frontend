@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
 import { clearAuth } from '../lib/auth'
 import BurnoutBadge from '../components/BurnoutBadge'
 import WeeklyCalendar from '../components/WeeklyCalendar'
+import InviteReminderModal from '../components/InviteReminderModal'
 
 interface BlockPreview { title: string; start: string; end: string; google_event_id?: string }
 
@@ -114,6 +115,9 @@ export default function ProfessorDashboard() {
   const [resolvingDecisionId, setResolvingDecisionId] = useState<number | null>(null)
   const [decisionNoteMap, setDecisionNoteMap] = useState<Record<number, string>>({})
 
+  const [showInviteReminder, setShowInviteReminder] = useState(false)
+  const inviteInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
     api.get('/professor/calendar').then(r => {
@@ -125,6 +129,13 @@ export default function ProfessorDashboard() {
     api.get('/professor/my-load').then(r => setMyLoad(r.data.today)).catch(() => {})
     // Always prefetch pending decisions so the tab badge is accurate from page load
     api.get('/decisions/inbox').then(r => setDecisions(r.data)).catch(() => {})
+    // Check team on mount so we can nudge the professor to invite a TA if empty
+    api.get('/professor/team').then(r => {
+      setTeam(r.data)
+      if (r.data.length === 0 && !sessionStorage.getItem('inviteReminderDismissed:professor')) {
+        setShowInviteReminder(true)
+      }
+    }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -294,6 +305,19 @@ export default function ProfessorDashboard() {
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
+      <InviteReminderModal
+        open={showInviteReminder}
+        role="professor"
+        onClose={() => {
+          sessionStorage.setItem('inviteReminderDismissed:professor', '1')
+          setShowInviteReminder(false)
+        }}
+        onInvite={() => {
+          sessionStorage.setItem('inviteReminderDismissed:professor', '1')
+          setShowInviteReminder(false)
+          inviteInputRef.current?.focus()
+        }}
+      />
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -372,6 +396,7 @@ export default function ProfessorDashboard() {
           </div>
 
           <input
+            ref={inviteInputRef}
             type="email"
             placeholder="TA's email"
             value={inviteEmail}
