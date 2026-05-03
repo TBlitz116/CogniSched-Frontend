@@ -8,6 +8,7 @@ import api from '../lib/api'
 import { clearAuth } from '../lib/auth'
 import PriorityBadge from '../components/PriorityBadge'
 import BurnoutBadge from '../components/BurnoutBadge'
+import InviteReminderModal from '../components/InviteReminderModal'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -171,10 +172,20 @@ export default function TADashboard() {
   const [sharingId, setSharingId] = useState<number | null>(null)
   const [taResolvingId, setTaResolvingId] = useState<number | null>(null)
 
+  const [showInviteReminder, setShowInviteReminder] = useState(false)
+  const inviteInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
     api.get('/ta/notifications').then(r => setNotifications(r.data))
     api.get('/ta/rejected-bookings').then(r => setRejectedBookings(r.data)).catch(() => {})
+    // Check student list on mount so we can nudge the TA to invite a student if empty
+    api.get('/mappings/my-students').then(r => {
+      setMyStudents(r.data)
+      if (r.data.length === 0 && !sessionStorage.getItem('inviteReminderDismissed:ta')) {
+        setShowInviteReminder(true)
+      }
+    }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -469,6 +480,19 @@ export default function TADashboard() {
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
+      <InviteReminderModal
+        open={showInviteReminder}
+        role="ta"
+        onClose={() => {
+          sessionStorage.setItem('inviteReminderDismissed:ta', '1')
+          setShowInviteReminder(false)
+        }}
+        onInvite={() => {
+          sessionStorage.setItem('inviteReminderDismissed:ta', '1')
+          setShowInviteReminder(false)
+          inviteInputRef.current?.focus()
+        }}
+      />
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
         <div>
@@ -477,6 +501,7 @@ export default function TADashboard() {
         </div>
         <div className="flex items-center gap-2">
           <input
+            ref={inviteInputRef}
             type="email"
             placeholder="Student's email"
             value={inviteEmail}
