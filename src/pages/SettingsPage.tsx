@@ -75,7 +75,7 @@ export default function SettingsPage() {
           </button>
           <h1 className="text-lg font-semibold text-gray-900">My Account</h1>
         </div>
-        <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-800 transition">
+        <button onClick={logout} className="text-sm text-blue-600 hover:text-blue-800 transition">
           Sign out
         </button>
       </header>
