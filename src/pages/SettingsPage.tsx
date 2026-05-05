@@ -33,6 +33,9 @@ export default function SettingsPage() {
   const navigate = useNavigate()
   const [account, setAccount] = useState<AccountData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     api.get('/users/me/account')
@@ -50,6 +53,19 @@ export default function SettingsPage() {
   function logout() {
     clearAuth()
     navigate('/login')
+  }
+
+  async function deleteAccount() {
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await api.delete('/users/me')
+      clearAuth()
+      navigate('/login')
+    } catch (err: any) {
+      setDeleteError(err?.response?.data?.error || 'Failed to delete account. Please try again.')
+      setDeleting(false)
+    }
   }
 
   if (loading) {
@@ -214,7 +230,50 @@ export default function SettingsPage() {
             )}
           </>
         )}
+        {/* Danger Zone */}
+        <section className="bg-white rounded-2xl border border-red-200 shadow-sm p-6">
+          <h2 className="text-sm font-semibold text-red-600 uppercase tracking-wide mb-2">Danger Zone</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Permanently delete your account and all associated data. This action cannot be undone.
+          </p>
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="text-sm font-medium px-4 py-2 rounded-lg border border-red-300 text-red-600 hover:bg-red-50 transition"
+          >
+            Delete Account
+          </button>
+        </section>
       </main>
+
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Delete account?</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              This will permanently delete your account ({account.email}) and all associated data. This action cannot be undone.
+            </p>
+            {deleteError && (
+              <p className="text-sm text-red-600 mb-3">{deleteError}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => { setShowDeleteConfirm(false); setDeleteError(null) }}
+                disabled={deleting}
+                className="text-sm px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100 transition disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteAccount}
+                disabled={deleting}
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-50"
+              >
+                {deleting ? 'Deleting...' : 'Delete Account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
