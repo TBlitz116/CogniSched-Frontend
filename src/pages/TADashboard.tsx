@@ -9,6 +9,7 @@ import { clearAuth } from '../lib/auth'
 import PriorityBadge from '../components/PriorityBadge'
 import BurnoutBadge from '../components/BurnoutBadge'
 import InviteReminderModal from '../components/InviteReminderModal'
+import WorkflowTab from '../components/WorkflowTab'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ function fmtDate(iso: string) {
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
-type Tab = 'requests' | 'calendar' | 'analytics' | 'tickets'
+type Tab = 'requests' | 'workflow' | 'calendar' | 'analytics' | 'tickets'
 
 export default function TADashboard() {
   const navigate = useNavigate()
@@ -473,6 +474,7 @@ export default function TADashboard() {
 
   const TABS: { key: Tab; label: string }[] = [
     { key: 'requests', label: 'Requests' },
+    { key: 'workflow', label: 'Workflow' },
     { key: 'calendar', label: 'Calendar' },
     { key: 'analytics', label: 'Analytics' },
     { key: 'tickets', label: 'Tickets' },
@@ -597,6 +599,7 @@ export default function TADashboard() {
             onToggleSimple={setUseSimple}
           />
         )}
+        {tab === 'workflow' && <WorkflowTab />}
         {tab === 'calendar' && <CalendarTab data={calendar} />}
         {tab === 'analytics' && (
           <AnalyticsTab scores={cogScores} burnout={burnout} density={density} />
