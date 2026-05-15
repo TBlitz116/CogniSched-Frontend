@@ -1,3 +1,18 @@
+// TA dashboard — the busiest page in the app. Five tabs:
+//
+//   ▸ Requests:  triage queue. Pick a student request, see scheduler-suggested slots
+//                (with cognitive-load explanations) and either book one, decline,
+//                or convert to a Decision (async approval routed up to the Professor).
+//   ▸ Workflow:  AI chat that drives the same actions in natural language (see
+//                components/WorkflowTab.tsx).
+//   ▸ Calendar:  the TA's own meetings + the Professor's blocks for context.
+//   ▸ Analytics: cognitive load over time, burnout trend, meeting density charts.
+//   ▸ Tickets:   upload a meeting transcript → AI extracts action items → file as
+//                tickets (some forwarded to the Professor, some kept TA-side).
+//
+// Most state lives at the top level so behaviours like "select request → preload
+// suggestions + history" can update many sub-views in lockstep.
+
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -12,9 +27,13 @@ import InviteReminderModal from '../components/InviteReminderModal'
 import WorkflowTab from '../components/WorkflowTab'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
+// These mirror the backend response shapes 1:1. Update both ends together when the
+// API changes.
 
 interface Student { id: number; name: string; email: string }
 
+// One action item extracted by AI from a meeting transcript on the Tickets tab.
+// The TA can edit shared_with_professor before submitting.
 interface ActionItem {
   title: string
   description: string
@@ -33,6 +52,9 @@ interface Ticket {
   student: Student | null
 }
 
+// A pending student meeting request shown in the Requests-tab list.
+// Despite the name "Notification" it's not a generic notification — these are
+// specifically un-actioned meeting requests.
 interface Notification {
   id: number
   student: Student
@@ -43,6 +65,8 @@ interface Notification {
   created_at: string
 }
 
+// "Why this slot?" metadata returned alongside each suggestion so the TA can see the
+// cognitive-load reasoning instead of trusting a magic score blindly.
 interface SlotExplanation {
   buffer_before_minutes: number | null
   buffer_after_minutes: number | null
@@ -55,13 +79,15 @@ interface SlotExplanation {
   professor_load_label: string | null
 }
 
+// One candidate meeting slot returned by the cognitive-load scheduler.
+// `score` is normalised; lower rank = better.
 interface Suggestion {
-  slot: string
+  slot: string                      // ISO start time
   duration_minutes: number
   score: number
   rank: number
   explanation: SlotExplanation
-  prompt_reasoning?: string
+  prompt_reasoning?: string         // Populated only for prompt-driven suggestions
 }
 
 interface CalendarMeeting {
@@ -82,6 +108,7 @@ interface ProfessorBlock {
   end_time: string
 }
 
+// One point on the Analytics cognitive-load chart (one entry per day).
 interface CognitiveDay {
   date: string
   score: number
@@ -89,8 +116,11 @@ interface CognitiveDay {
   meeting_count: number
 }
 
+// One bar on the meeting-density histogram (one entry per hour of day).
 interface DensityPoint { hour: number; count: number }
 
+// Aggregated history for a single student, shown next to the slot suggestions when
+// the TA selects a request. Drives the "consider a simple meeting" hint.
 interface StudentHistory {
   student: { id: number; name: string }
   booked_meeting_count: number
@@ -103,6 +133,7 @@ interface StudentHistory {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+// Compact "Mon, Jan 5, 03:00 PM" formatter used throughout the page.
 function fmt(iso: string) {
   return new Date(iso).toLocaleString(undefined, {
     weekday: 'short', month: 'short', day: 'numeric',
@@ -110,6 +141,7 @@ function fmt(iso: string) {
   })
 }
 
+// Date-only formatter ("Jan 5") used in analytics chart axis labels.
 function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
@@ -120,29 +152,41 @@ type Tab = 'requests' | 'workflow' | 'calendar' | 'analytics' | 'tickets'
 
 export default function TADashboard() {
   const navigate = useNavigate()
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  // Current tab.
   const [tab, setTab] = useState<Tab>('requests')
+  // Signed-in user (header greeting).
   const [user, setUser] = useState<{ name: string; email: string } | null>(null)
+
+  // Requests tab — left panel: list of incoming requests.
   const [notifications, setNotifications] = useState<Notification[]>([])
+
+  // Requests tab — right panel state. When a request is selected we load three things
+  // in parallel: recommended slots, soonest slots, and the student's history.
   const [selected, setSelected] = useState<Notification | null>(null)
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [loadingSuggestions, setLoadingSuggestions] = useState(false)
-  const [bookingId, setBookingId] = useState<string | null>(null)
-  const [slotPrompt, setSlotPrompt] = useState('')
+  const [bookingId, setBookingId] = useState<string | null>(null)       // which slot is being booked right now (disables the row)
+  const [slotPrompt, setSlotPrompt] = useState('')                       // "find slots that ___" prompt
   const [promptLoading, setPromptLoading] = useState(false)
   const [promptReasoning, setPromptReasoning] = useState<string | null>(null)
   const [slotTab, setSlotTab] = useState<'recommended' | 'soonest' | 'history'>('recommended')
   const [soonestSuggestions, setSoonestSuggestions] = useState<Suggestion[]>([])
   const [loadingSoonest, setLoadingSoonest] = useState(false)
-  const [rejectedBookings, setRejectedBookings] = useState<any[]>([])
+  const [rejectedBookings, setRejectedBookings] = useState<any[]>([])    // bookings the prof rejected — surfaced as a banner
   const [historyRec, setHistoryRec] = useState<{ recommendation: string; reasoning: string } | null>(null)
   const [historyData, setHistoryData] = useState<StudentHistory | null>(null)
   const [loadingHistory, setLoadingHistory] = useState(false)
-  const [useSimple, setUseSimple] = useState(false)
+  const [useSimple, setUseSimple] = useState(false)                       // skip Meet link when true
 
+  // Calendar / Analytics tab data (lazy-loaded by the tab-switch effect below).
   const [calendar, setCalendar] = useState<{ meetings: CalendarMeeting[]; professor_blocks: ProfessorBlock[] } | null>(null)
   const [cogScores, setCogScores] = useState<CognitiveDay[]>([])
   const [burnout, setBurnout] = useState<{ current_risk: string; trend: CognitiveDay[] } | null>(null)
   const [density, setDensity] = useState<DensityPoint[]>([])
+
+  // Invite-a-student control (lives in the header).
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteSending, setInviteSending] = useState(false)
   const [inviteMsg, setInviteMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
@@ -161,7 +205,8 @@ export default function TADashboard() {
   const [decisionTaNote, setDecisionTaNote] = useState('')
   const [decisionError, setDecisionError] = useState<string | null>(null)
 
-  // Tickets tab state
+  // Tickets tab state — student picker, transcript paste-in, AI-extracted items,
+  // and the resulting list of tickets the TA owns.
   const [myStudents, setMyStudents] = useState<Student[]>([])
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [ticketStudentId, setTicketStudentId] = useState<number | null>(null)
@@ -173,9 +218,12 @@ export default function TADashboard() {
   const [sharingId, setSharingId] = useState<number | null>(null)
   const [taResolvingId, setTaResolvingId] = useState<number | null>(null)
 
+  // First-load nudge: prompt TAs to invite a student if they have none.
   const [showInviteReminder, setShowInviteReminder] = useState(false)
   const inviteInputRef = useRef<HTMLInputElement>(null)
 
+  // Initial fetch — runs once. Each request is independent; failures of optional
+  // sub-resources are swallowed so the rest of the page still renders.
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
     api.get('/ta/notifications').then(r => setNotifications(r.data))
@@ -189,6 +237,7 @@ export default function TADashboard() {
     }).catch(() => {})
   }, [])
 
+  // Lazy fetch per tab — only hits the endpoints we need for the current view.
   useEffect(() => {
     if (tab === 'calendar') {
       api.get('/ta/calendar').then(r => setCalendar(r.data))
@@ -204,6 +253,10 @@ export default function TADashboard() {
     }
   }, [tab])
 
+  // Click on a request in the left list. Resets all related panels and kicks off
+  // three parallel fetches: recommended slots, soonest slots, and student history.
+  // History is loaded second-pass (after slots) so the right pane has something to
+  // show as quickly as possible.
   async function selectRequest(n: Notification) {
     setSelected(n)
     setSuggestions([])
@@ -239,6 +292,10 @@ export default function TADashboard() {
     }
   }
 
+  // "Find slots that match this constraint" — the TA can type extra hints
+  // ("after 2pm next week", "avoid Mondays") and we re-rank slots based on the prompt.
+  // Returned suggestions overwrite the recommended list; `prompt_reasoning` on the
+  // first item is surfaced so the TA can see why the AI ranked them this way.
   async function suggestByPrompt() {
     if (!selected || !slotPrompt.trim()) return
     setPromptLoading(true)
@@ -257,6 +314,11 @@ export default function TADashboard() {
     }
   }
 
+  // Book a meeting using a recommended slot.
+  //   - simple=true skips creating a Google Meet link (used when the AI's history
+  //     recommendation says SIMPLE_MEETING and the TA agrees).
+  //   - We strip the trailing "Z" off the ISO timestamps because the backend stores
+  //     naive timestamps in UTC and adding "Z" would double-tag them.
   async function book(suggestion: Suggestion, simple: boolean) {
     if (!selected) return
     setBookingId(suggestion.slot)
@@ -278,6 +340,9 @@ export default function TADashboard() {
     }
   }
 
+  // Book using the "soonest available" view. Goes to a different endpoint because
+  // those slots bypass some of the cognitive-load scoring (they're optimised purely
+  // for time-to-meeting).
   async function bookSoonest(suggestion: Suggestion) {
     if (!selected) return
     setBookingId(suggestion.slot)
@@ -296,12 +361,17 @@ export default function TADashboard() {
     }
   }
 
+  // Decline a request outright. Removes it from the local list and clears the right
+  // pane if it was the currently-selected request.
   async function decline(id: number) {
     await api.post(`/ta/decline/${id}`)
     setNotifications(prev => prev.filter(n => n.id !== id))
     if (selected?.id === id) { setSelected(null); setSuggestions([]) }
   }
 
+  // Open the Decision Inbox modal for a given request. Behind the scenes we ask the
+  // backend to draft a structured "question / context / recommendation / options"
+  // payload from the request, which the TA can then edit before sending.
   async function openDecisionModal(n: Notification) {
     setDecisionFor(n)
     setDecisionDraft(null)
@@ -323,6 +393,8 @@ export default function TADashboard() {
     }
   }
 
+  // Ask the backend to re-draft using an extra hint typed by the TA
+  // ("emphasise that this is exam-related"). Same endpoint, optional ta_note.
   async function redraftDecision() {
     if (!decisionFor) return
     setDecisionDrafting(true)
@@ -345,6 +417,9 @@ export default function TADashboard() {
     }
   }
 
+  // Finalise the decision: send it to the Professor's inbox. Light client-side
+  // validation (summary and at least one option are required) — the backend
+  // validates again for safety. Trims whitespace and drops empty option strings.
   async function submitDecision() {
     if (!decisionFor || !decisionDraft) return
     if (!decisionDraft.question_summary.trim()) {
@@ -377,6 +452,7 @@ export default function TADashboard() {
     }
   }
 
+  // Wipe all decision-modal state when the user cancels.
   function closeDecisionModal() {
     setDecisionFor(null)
     setDecisionDraft(null)
@@ -384,6 +460,7 @@ export default function TADashboard() {
     setDecisionTaNote('')
   }
 
+  // Invite a student. Backend emails them a /join?token=... link.
   async function sendInvite() {
     if (!inviteEmail.trim()) return
     setInviteSending(true)
@@ -399,6 +476,9 @@ export default function TADashboard() {
     }
   }
 
+  // Tickets tab — step 1: paste a meeting transcript, AI extracts action items.
+  // Each item is pre-classified as "share with prof" or "TA-side only"; the TA can
+  // flip those toggles before step 2 (submitTickets).
   async function extractItems() {
     if (!ticketStudentId || !transcript.trim()) return
     setExtracting(true)

@@ -1,13 +1,22 @@
+// Friendly nudge modal shown to professors who haven't invited any TAs yet, and to TAs
+// who haven't invited any students. We pop this up so a fresh dashboard isn't just an
+// empty screen — it tells the user the very next thing they should do.
+//
+// The parent dashboard owns the `open` state and the invite handler; this component is
+// purely presentational.
+
 interface Props {
-  open: boolean
-  role: 'professor' | 'ta'
-  onClose: () => void
-  onInvite: () => void
+  open: boolean                          // Whether to render the modal at all
+  role: 'professor' | 'ta'               // Drives the copy + which CTA we show
+  onClose: () => void                    // Dismiss without inviting ("Later" button)
+  onInvite: () => void                   // Jump into the invite flow ("Invite …" button)
 }
 
 export default function InviteReminderModal({ open, role, onClose, onInvite }: Props) {
+  // Quick exit — render nothing when the parent has hidden the modal.
   if (!open) return null
 
+  // Pick role-specific text. Keeping all the copy in one place makes it easy to tweak.
   const isProfessor = role === 'professor'
   const title = isProfessor ? 'Invite a TA to get started' : 'Invite a student to get started'
   const body = isProfessor
@@ -16,10 +25,13 @@ export default function InviteReminderModal({ open, role, onClose, onInvite }: P
   const cta = isProfessor ? 'Invite TA' : 'Invite Student'
 
   return (
+    // Full-screen dark overlay; the inner card is centred on top of it.
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
       <div className="bg-white rounded-xl shadow-xl border border-gray-200 max-w-md w-full p-6 flex flex-col gap-4">
+        {/* Header: icon + title + body copy */}
         <div className="flex items-start gap-3">
           <div className="bg-indigo-50 text-indigo-600 rounded-full p-2 shrink-0">
+            {/* People icon (inline SVG so we don't pull in an icon library) */}
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
               <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
             </svg>
@@ -29,6 +41,8 @@ export default function InviteReminderModal({ open, role, onClose, onInvite }: P
             <p className="text-sm text-gray-600 mt-1">{body}</p>
           </div>
         </div>
+
+        {/* Footer: "Later" (dismiss) + primary "Invite …" CTA */}
         <div className="flex justify-end gap-2 pt-2 border-t border-gray-100">
           <button
             onClick={onClose}

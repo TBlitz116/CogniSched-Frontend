@@ -1,8 +1,19 @@
+// Shared "My Account" page — used by Professors, TAs, and Students.
+//
+// What it shows depends on the user's role:
+//   - PROFESSOR: their profile + a list of their TAs (with how many students each has).
+//   - TA:        their profile + their Professor + their assigned Students.
+//   - STUDENT:   their profile + their TA + their Professor.
+//
+// Also provides Sign-out and a destructive "Delete Account" flow guarded by a modal.
+
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
 import { clearAuth, getStoredRole, getRolePath } from '../lib/auth'
 
+// A person we display in one of the relationship cards (TA, student, professor).
+// student_count is only present for TAs returned inside a Professor's `tas` list.
 interface Person {
   id: number
   name: string
@@ -10,6 +21,8 @@ interface Person {
   student_count?: number
 }
 
+// Aggregate payload returned by GET /users/me/account.
+// Only the fields relevant to the user's role will be populated.
 interface AccountData {
   id: number
   name: string
@@ -17,12 +30,13 @@ interface AccountData {
   role: string
   timezone: string
   has_google_calendar: boolean
-  tas?: Person[]
-  professor?: Person
-  students?: Person[]
-  ta?: Person
+  tas?: Person[]         // Professor view: their TAs
+  professor?: Person     // TA / Student view: their Professor
+  students?: Person[]    // TA view: their Students
+  ta?: Person            // Student view: their TA
 }
 
+// Human-readable role labels used in the profile card.
 const ROLE_LABEL: Record<string, string> = {
   PROFESSOR: 'Professor',
   TA: 'Teaching Assistant',
@@ -33,10 +47,14 @@ export default function SettingsPage() {
   const navigate = useNavigate()
   const [account, setAccount] = useState<AccountData | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Delete-account flow uses three pieces of state: open/closed, in-flight, last error.
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
+  // Fetch the user's account on mount. If the request fails (expired token, etc.) we
+  // bounce them to /login instead of leaving the page stuck in a loading state.
   useEffect(() => {
     api.get('/users/me/account')
       .then(r => setAccount(r.data))
@@ -44,17 +62,21 @@ export default function SettingsPage() {
       .finally(() => setLoading(false))
   }, [navigate])
 
+  // "Back to Dashboard" button — figure out which dashboard based on the stored role.
   function goBack() {
     const role = getStoredRole()
     if (role) navigate(getRolePath(role))
     else navigate('/login')
   }
 
+  // Sign out: clear localStorage, then route to /login.
   function logout() {
     clearAuth()
     navigate('/login')
   }
 
+  // Hard-delete the account on the backend, then locally clear creds and bail out.
+  // Errors are surfaced inside the confirm modal so the user can retry/cancel.
   async function deleteAccount() {
     setDeleting(true)
     setDeleteError(null)

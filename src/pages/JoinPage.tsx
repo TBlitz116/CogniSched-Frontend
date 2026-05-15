@@ -1,3 +1,11 @@
+// Invite-acceptance page.
+//
+// Reached via /join?token=<invite_token>. The token is created by the backend when a
+// Professor invites a TA, or a TA invites a Student, and is emailed to the recipient.
+//
+// The sign-in flow is the same as LoginPage but we ALSO pass the invite token through
+// to /auth/google so the backend can wire the new user up to the right Professor/TA.
+
 import { useEffect } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useGoogleLogin } from '@react-oauth/google'
@@ -9,6 +17,8 @@ export default function JoinPage() {
   const navigate = useNavigate()
   const inviteToken = params.get('token')
 
+  // If somebody hits /join without a token there's nothing for us to do — send them
+  // to the normal login page.
   useEffect(() => {
     if (!inviteToken) navigate('/login')
   }, [inviteToken, navigate])
@@ -17,6 +27,8 @@ export default function JoinPage() {
     flow: 'auth-code',
     scope: 'openid email profile https://www.googleapis.com/auth/calendar',
     onSuccess: async ({ code }) => {
+      // Same /auth/google endpoint as LoginPage, plus the invite_token so the backend
+      // can attach the new account to the inviter.
       const res = await api.post('/auth/google', {
         code,
         redirect_uri: window.location.origin,

@@ -1,3 +1,25 @@
+// Professor dashboard — the most feature-rich screen in the app.
+//
+// Layout:
+//   ┌─ Header (load badge, notification bell, invite-TA input, settings/sign-out)
+//   ├─ Prompt bar (natural-language calendar blocking — preview → confirm)
+//   ├─ Tab bar (Calendar | Team | Decisions | Tickets)
+//   └─ Tab content
+//
+// Major features:
+//   • Calendar tab:  weekly view that merges Google events + manual blocks + booked
+//                    student meetings.
+//   • Team tab:      list of TAs with their burnout risk and cognitive scores.
+//   • Decisions tab: async "yes/no" decisions TAs have routed up rather than booking
+//                    a full meeting. Professor picks an option and the system records
+//                    a structured outcome for analytics.
+//   • Tickets tab:   action tickets escalated by TAs (e.g. issues from meeting
+//                    transcripts). Professor can update status, leave a note, or
+//                    request a meeting.
+//
+// On mount we fire several /professor/* endpoints in parallel — many are best-effort
+// (.catch(() => {})) so a single failed sub-resource doesn't break the page.
+
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
@@ -6,17 +28,22 @@ import BurnoutBadge from '../components/BurnoutBadge'
 import WeeklyCalendar from '../components/WeeklyCalendar'
 import InviteReminderModal from '../components/InviteReminderModal'
 
+// ── Types: mirror the backend response shapes ─────────────────────────────────
+
+// Parsed-but-not-yet-saved block returned by /professor/block/preview.
 interface BlockPreview { title: string; start: string; end: string; google_event_id?: string }
 
+// A saved manual block (the professor said "block Tuesday 2–4pm").
 interface CalendarBlock {
   id: number
   title: string
   start_time: string
   end_time: string
-  source_prompt: string
-  google_event_id: string | null
+  source_prompt: string                 // The original NL prompt — useful for debugging
+  google_event_id: string | null        // Set if we also wrote a corresponding Google event
 }
 
+// One event imported from the professor's Google Calendar.
 interface GoogleEvent {
   id: string
   title: string
@@ -25,15 +52,18 @@ interface GoogleEvent {
   meet_link: string | null
 }
 
+// A TA row shown on the "Team" tab.
 interface TAOverview {
   id: number
   name: string
   email: string
-  burnout_risk: string
-  cognitive_score: number
+  burnout_risk: string                  // LOW / MEDIUM / HIGH — drives BurnoutBadge
+  cognitive_score: number               // 0–100ish; higher = more loaded
   student_count: number
 }
 
+// A booking the TA proposed that needs professor approval before being confirmed.
+// (Rendered in the bell dropdown.)
 interface PendingApprovalItem {
   id: number
   student: { id: number; name: string; email: string }
@@ -44,8 +74,10 @@ interface PendingApprovalItem {
   created_at: string
 }
 
+// Tab IDs for the second-row navigation under the prompt bar.
 type Tab = 'calendar' | 'team' | 'tickets' | 'decisions'
 
+// A "decision" the TA escalated. Professor picks one of `options` to resolve it.
 interface DecisionCard {
   id: number
   request_id: number | null
@@ -63,6 +95,8 @@ interface DecisionCard {
   ta: { id: number; name: string; email: string } | null
 }
 
+// A ticket the TA escalated (often from a meeting transcript). Has its own status
+// lifecycle: OPEN → IN_PROGRESS → RESOLVED.
 interface IncomingTicket {
   id: number
   title: string
@@ -75,6 +109,7 @@ interface IncomingTicket {
   ta: { id: number; name: string; email: string } | null
 }
 
+// Compact display formatter shared across this file.
 function fmt(iso: string) {
   return new Date(iso).toLocaleString(undefined, {
     weekday: 'short', month: 'short', day: 'numeric',
@@ -84,40 +119,62 @@ function fmt(iso: string) {
 
 export default function ProfessorDashboard() {
   const navigate = useNavigate()
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  // Which tab is active.
   const [tab, setTab] = useState<Tab>('calendar')
+  // Signed-in user (just for the header greeting).
   const [user, setUser] = useState<{ name: string; email: string } | null>(null)
+
+  // Prompt-bar state for natural-language blocking.
   const [prompt, setPrompt] = useState('')
-  const [previewing, setPreviewing] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const [previews, setPreviews] = useState<BlockPreview[] | null>(null)
+  const [previewing, setPreviewing] = useState(false)                      // parsing in flight
+  const [confirming, setConfirming] = useState(false)                      // saving in flight
+  const [previews, setPreviews] = useState<BlockPreview[] | null>(null)    // parsed blocks awaiting confirmation
   const [previewError, setPreviewError] = useState<string | null>(null)
+
+  // Calendar tab data (merged into one events array passed to WeeklyCalendar).
   const [blocks, setBlocks] = useState<CalendarBlock[]>([])
   const [bookedMeetings, setBookedMeetings] = useState<{ id: number; type: string; title: string; start_time: string; end_time: string; google_meet_link: string | null }[]>([])
   const [googleEvents, setGoogleEvents] = useState<GoogleEvent[]>([])
+
+  // Team tab data + invite-TA controls (the invite input lives in the header).
   const [team, setTeam] = useState<TAOverview[]>([])
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteSending, setInviteSending] = useState(false)
   const [inviteMsg, setInviteMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  // Approvals shown in the bell dropdown.
   const [approvals, setApprovals] = useState<PendingApprovalItem[]>([])
   const [bellOpen, setBellOpen] = useState(false)
+
+  // Tickets tab — per-ticket edit state lives in maps keyed by ticket id so editing
+  // one row doesn't trigger re-renders for the others.
   const [incomingTickets, setIncomingTickets] = useState<IncomingTicket[]>([])
   const [ticketStatusMap, setTicketStatusMap] = useState<Record<number, 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'>>({})
   const [ticketNoteMap, setTicketNoteMap] = useState<Record<number, string>>({})
   const [updatingTicket, setUpdatingTicket] = useState<number | null>(null)
   const [initiatingMeetingFor, setInitiatingMeetingFor] = useState<number | null>(null)
+  // Track which tickets already had a meeting initiated this session so we can swap
+  // the button label without refetching.
   const [meetingInitiatedFor, setMeetingInitiatedFor] = useState<Set<number>>(new Set())
 
+  // Professor's own cognitive load score for today (header badge).
   const [myLoad, setMyLoad] = useState<{ score: number; label: string; block_count: number; blocked_hours: number } | null>(null)
 
   // Decision Inbox state
   const [decisions, setDecisions] = useState<DecisionCard[]>([])
-  const [resolvedToday, setResolvedToday] = useState(0)
+  const [resolvedToday, setResolvedToday] = useState(0)                    // shown in the inbox summary card
   const [resolvingDecisionId, setResolvingDecisionId] = useState<number | null>(null)
   const [decisionNoteMap, setDecisionNoteMap] = useState<Record<number, string>>({})
 
+  // "Invite a TA" nudge that pops on first load if the professor has zero TAs.
+  // sessionStorage flag prevents nagging within the same session if dismissed.
   const [showInviteReminder, setShowInviteReminder] = useState(false)
-  const inviteInputRef = useRef<HTMLInputElement>(null)
+  const inviteInputRef = useRef<HTMLInputElement>(null)                    // for focusing the invite input
 
+  // Initial fan-out fetch on mount. Each call is independent; failures of optional
+  // sub-resources are silently swallowed so the rest of the page still renders.
   useEffect(() => {
     api.get('/users/me').then(r => setUser(r.data))
     api.get('/professor/calendar').then(r => {
@@ -138,10 +195,14 @@ export default function ProfessorDashboard() {
     }).catch(() => {})
   }, [])
 
+  // Lazy fetch — only hit endpoints relevant to the active tab. Re-runs every time
+  // the user switches tabs so data feels fresh without a manual refresh.
   useEffect(() => {
     if (tab === 'team') {
       api.get('/professor/team').then(r => setTeam(r.data))
     } else if (tab === 'decisions') {
+      // Inbox = currently pending; history = everything ever, filtered client-side to
+      // resolved-today for the "Cleared today" counter.
       api.get('/decisions/inbox').then(r => setDecisions(r.data)).catch(() => {})
       api.get('/decisions/history').then(r => {
         const today = new Date().toDateString()
@@ -153,6 +214,8 @@ export default function ProfessorDashboard() {
     } else if (tab === 'tickets') {
       api.get('/tickets/incoming').then(r => {
         setIncomingTickets(r.data)
+        // Seed the per-ticket edit maps so the status <select> + note input start
+        // pre-filled with whatever the backend currently has.
         const statusInit: Record<number, 'OPEN' | 'IN_PROGRESS' | 'RESOLVED'> = {}
         const noteInit: Record<number, string> = {}
         r.data.forEach((t: IncomingTicket) => {
@@ -165,6 +228,9 @@ export default function ProfessorDashboard() {
     }
   }, [tab])
 
+  // Step 1 of NL blocking: send the prompt to the backend AI for parsing without
+  // saving anything yet. We always include the browser's IANA timezone so "Tuesday
+  // 2pm" is interpreted in the professor's locale.
   async function preview() {
     if (!prompt.trim()) return
     setPreviewing(true)
@@ -181,6 +247,12 @@ export default function ProfessorDashboard() {
     }
   }
 
+  // Step 2 of NL blocking: actually persist the blocks. The backend re-parses the
+  // prompt rather than trusting the previews from the client, so the user can't
+  // tamper with start/end times via devtools.
+  // Optimistic UI: append the saved blocks to local state immediately rather than
+  // refetching the whole calendar — Date.now()+i is a throwaway client id; the real
+  // ids will be picked up on the next /professor/calendar fetch.
   async function confirm() {
     if (!previews) return
     setConfirming(true)
@@ -191,7 +263,7 @@ export default function ProfessorDashboard() {
       setBlocks(prev => [
         ...prev,
         ...newBlocks.map((b, i) => ({
-          id: Date.now() + i,
+          id: Date.now() + i,                     // temporary client-side id
           title: b.title,
           start_time: b.start,
           end_time: b.end,
@@ -208,6 +280,7 @@ export default function ProfessorDashboard() {
     }
   }
 
+  // Send an invite email to a TA. POST /auth/invite generates a token-bearing /join URL.
   async function sendInvite() {
     if (!inviteEmail.trim()) return
     setInviteSending(true)
@@ -223,6 +296,8 @@ export default function ProfessorDashboard() {
     }
   }
 
+  // Accept/reject a TA's proposed booking from the bell dropdown.
+  // We optimistically remove the row from `approvals` on success.
   async function handleApproval(id: number, action: 'approve' | 'reject') {
     try {
       await api.post(`/professor/${action}/${id}`)
@@ -232,6 +307,8 @@ export default function ProfessorDashboard() {
     }
   }
 
+  // Resolve a decision card by clicking one of its options. Removes the card from
+  // the inbox and bumps the "Cleared today" counter optimistically.
   async function resolveDecision(
     card: DecisionCard,
     outcome: 'APPROVED' | 'DENIED' | 'ESCALATED_TO_MEETING' | 'NEEDS_MORE_INFO',
@@ -266,6 +343,9 @@ export default function ProfessorDashboard() {
     return 'APPROVED'
   }
 
+  // From the Tickets tab, ask the system to create a meeting request between the
+  // student and TA tied to this ticket. Used when the professor wants a live
+  // conversation instead of resolving the ticket asynchronously.
   async function initiateMeeting(ticket: IncomingTicket) {
     if (!ticket.student || !ticket.ta) return
     setInitiatingMeetingFor(ticket.id)
@@ -284,6 +364,9 @@ export default function ProfessorDashboard() {
     }
   }
 
+  // PATCH the ticket's status (and optional resolution note) when the professor
+  // clicks "Update" on a ticket row. Replaces the local row with the server's
+  // response so e.g. resolved_at gets populated.
   async function updateTicket(ticketId: number) {
     setUpdatingTicket(ticketId)
     try {
@@ -303,8 +386,11 @@ export default function ProfessorDashboard() {
 
   function logout() { clearAuth(); navigate('/login') }
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
+      {/* "Invite a TA" nudge modal — shown only when the professor has no TAs yet
+          and they haven't dismissed it this session. */}
       <InviteReminderModal
         open={showInviteReminder}
         role="professor"
@@ -325,6 +411,7 @@ export default function ProfessorDashboard() {
             <h1 className="text-lg font-semibold text-gray-900">Scheduler</h1>
             {user && <p className="text-xs text-gray-500">{user.name} · Professor</p>}
           </div>
+          {/* Today's cognitive load pill — colour-coded by label (Light/Moderate/Heavy). */}
           {myLoad && (
             <div className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border ${
               myLoad.label === 'Light'
@@ -342,7 +429,8 @@ export default function ProfessorDashboard() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* Notification bell */}
+          {/* Notification bell — counts pending TA-proposed bookings. Clicking opens a
+              dropdown where the professor can approve/reject each one inline. */}
           <div className="relative">
             <button
               onClick={() => setBellOpen(!bellOpen)}
@@ -395,6 +483,8 @@ export default function ProfessorDashboard() {
             )}
           </div>
 
+          {/* Inline "invite TA" composer — the ref lets the InviteReminderModal focus
+              this input when the user clicks its primary CTA. */}
           <input
             ref={inviteInputRef}
             type="email"
@@ -439,7 +529,9 @@ export default function ProfessorDashboard() {
         </div>
       )}
 
-      {/* Prompt bar — always visible */}
+      {/* Prompt bar — always visible across all tabs. Two-step UX:
+          1) Type a prompt → click Preview → AI returns parsed BlockPreview[].
+          2) Review the cards → click Confirm to actually save them. */}
       <div className="bg-white border-b border-gray-200 px-6 py-4">
         <div className="max-w-3xl mx-auto flex flex-col gap-3">
           <div className="flex gap-3">
@@ -497,7 +589,8 @@ export default function ProfessorDashboard() {
         </div>
       </div>
 
-      {/* Tab bar */}
+      {/* Tab bar — shows badges for inbox counts so the professor can see at a glance
+          where their attention is needed. */}
       <nav className="bg-white border-b border-gray-200 px-6 flex gap-1">
         {(['calendar', 'team', 'decisions', 'tickets'] as Tab[]).map(t => (
           <button
@@ -537,6 +630,8 @@ export default function ProfessorDashboard() {
       {/* Tab content */}
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-3xl mx-auto">
+          {/* Calendar tab — merge three sources into one event list with consistent
+              IDs (prefixed g-/b-/m- so they don't collide) and `type` for colour. */}
           {tab === 'calendar' && (
             <WeeklyCalendar
               events={[
@@ -567,6 +662,7 @@ export default function ProfessorDashboard() {
             />
           )}
 
+          {/* Decisions tab — async approvals routed up from TAs. */}
           {tab === 'decisions' && (
             <div className="flex flex-col gap-4">
               {/* Header summary */}
@@ -643,6 +739,9 @@ export default function ProfessorDashboard() {
                     className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder-gray-400"
                   />
 
+                  {/* Option buttons — colour-coded by the heuristic outcome so deny
+                      reads as destructive (red), escalate as neutral (gray), info as
+                      amber, and the default approve as green. */}
                   <div className="flex flex-wrap gap-2 pt-1 border-t border-gray-100">
                     {card.options.map(opt => {
                       const outcome = outcomeFromOption(opt)
@@ -673,6 +772,7 @@ export default function ProfessorDashboard() {
             </div>
           )}
 
+          {/* Tickets tab — TA-escalated tickets the professor needs to act on. */}
           {tab === 'tickets' && (
             <div className="flex flex-col gap-4">
               <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
@@ -753,6 +853,7 @@ export default function ProfessorDashboard() {
             </div>
           )}
 
+          {/* Team tab — quick overview of each TA's load + burnout signal. */}
           {tab === 'team' && (
             <div className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">Your TAs</h2>

@@ -28,7 +28,7 @@ The system follows a strict **three-role hierarchy**: Professor → TA → Stude
 | Google Calendar API | Event creation, busy/free slots, Meet link generation |
 | Google Gemini API | Natural language classification and parsing |
 | SendGrid | Invite email delivery |
-| UMBC Faculty Website | Professor identity verification (scraped) |
+| UMBC Faculty Website | Professor identity verification (scraped) | golang addition
 
 ---
 
@@ -508,4 +508,4 @@ Each candidate slot is scored by simulating its cognitive impact:
 
 **Frontend (Vercel)**:
 - `VITE_API_BASE_URL` — Backend production URL
-- `VITE_GOOGLE_CLIENT_ID` — Google OAuth client ID
+- `VITE_GOOGLE_CLIENT_ID` — Google OAuth client IDs

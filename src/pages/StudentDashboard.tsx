@@ -1,9 +1,20 @@
+// Student-facing dashboard.
+//
+// Two things a student does here:
+//   1. Submit a natural-language meeting request to their TA. The backend AI parses
+//      the prompt to detect priority, topic, and preferred time. Returned data lands
+//      in `latest` and is also prepended to `requests`.
+//   2. See the status (PENDING / SCHEDULED / DECLINED) of every previous request, plus
+//      any "Action Tickets" the TA escalated to the Professor on the student's behalf.
+
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
 import { clearAuth } from '../lib/auth'
 import PriorityBadge from '../components/PriorityBadge'
 
+// One row in the "Your requests" list. `summary` is only populated for the most
+// recently submitted request (returned by POST /requests/new).
 interface MeetingRequest {
   id: number
   prompt_text: string
@@ -15,6 +26,8 @@ interface MeetingRequest {
   summary?: string
 }
 
+// "Action Ticket" — when a TA can't resolve a student's issue alone, they escalate
+// it as a ticket. May or may not be shared with the Professor.
 interface StudentTicket {
   id: number
   title: string
@@ -28,6 +41,7 @@ interface StudentTicket {
 }
 
 
+// Tailwind classes per request status — keeps the colour mapping in one place.
 const STATUS_STYLES: Record<string, string> = {
   PENDING:   'bg-yellow-100 text-yellow-700',
   SCHEDULED: 'bg-green-100 text-green-700',
@@ -36,14 +50,30 @@ const STATUS_STYLES: Record<string, string> = {
 
 export default function StudentDashboard() {
   const navigate = useNavigate()
+
+  // Input + submit-in-flight state for the "request a meeting" composer.
   const [prompt, setPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
+
+  // Most recent submission — rendered as a highlighted callout under the composer so
+  // the student immediately sees the AI's parsed interpretation.
   const [latest, setLatest] = useState<(MeetingRequest & { summary?: string }) | null>(null)
+
+  // All of this student's past requests, newest first.
   const [requests, setRequests] = useState<MeetingRequest[]>([])
+
+  // Page-level loading flag for the initial 3-endpoint fetch below.
   const [loading, setLoading] = useState(true)
+
+  // Currently signed-in user (used to show their name in the header).
   const [user, setUser] = useState<{ name: string; email: string } | null>(null)
+
+  // Action Tickets escalated to/by the TA.
   const [tickets, setTickets] = useState<StudentTicket[]>([])
 
+  // Initial fetch: pull user info, request history, and tickets in parallel.
+  // The tickets endpoint is best-effort (.catch swallows errors) because older student
+  // accounts may not have it enabled yet.
   useEffect(() => {
     Promise.all([
       api.get('/users/me').then(r => setUser(r.data)),
@@ -52,24 +82,28 @@ export default function StudentDashboard() {
     ]).finally(() => setLoading(false))
   }, [])
 
+  // Submit a new meeting request. The backend parses it with AI and returns the
+  // enriched MeetingRequest (with detected priority/topic + summary).
   async function submit() {
     if (!prompt.trim()) return
     setSubmitting(true)
     try {
       const res = await api.post('/requests/new', { prompt_text: prompt })
-      setLatest(res.data)
-      setRequests(prev => [res.data, ...prev])
-      setPrompt('')
+      setLatest(res.data)                              // show "latest result" panel
+      setRequests(prev => [res.data, ...prev])         // prepend to history list
+      setPrompt('')                                    // clear input
     } finally {
       setSubmitting(false)
     }
   }
 
+  // Sign out helper — same pattern as the other dashboards.
   function logout() {
     clearAuth()
     navigate('/login')
   }
 
+  // Pretty-print an ISO timestamp for display, e.g. "Mon, Jan 5, 03:00 PM".
   function formatTime(iso: string) {
     return new Date(iso).toLocaleString(undefined, {
       weekday: 'short', month: 'short', day: 'numeric',
@@ -212,6 +246,9 @@ export default function StudentDashboard() {
   )
 }
 
+// Placeholder row shown under SCHEDULED requests. We used to fetch the actual Meet
+// link here, but we now rely on the Google Calendar invite (which contains the link)
+// instead of duplicating it in our UI. requestId is kept on the props for future use.
 function MeetingLinkRow({ requestId: _requestId }: { requestId: number }) {
 
   return (

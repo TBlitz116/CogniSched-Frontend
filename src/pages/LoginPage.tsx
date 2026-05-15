@@ -1,3 +1,15 @@
+// Landing / sign-in page for users who already have an account (or are a Professor
+// signing up for the first time — Professors self-serve, TAs and Students need an
+// invite link which goes through JoinPage instead).
+//
+// The actual auth handshake:
+//   1. useGoogleLogin pops up the Google OAuth consent screen.
+//   2. Google returns a one-time `code` to us in the browser.
+//   3. We POST that code to /auth/google on our backend.
+//   4. Backend exchanges it for tokens with Google, looks up / creates the user,
+//      and returns our own JWT + the user's role.
+//   5. We persist token + role (storeAuth) and route to the role's dashboard.
+
 import { useGoogleLogin } from '@react-oauth/google'
 import { useNavigate } from 'react-router-dom'
 import api from '../lib/api'
@@ -6,10 +18,13 @@ import { storeAuth, getRolePath } from '../lib/auth'
 export default function LoginPage() {
   const navigate = useNavigate()
 
+  // Configure the Google OAuth hook. We request calendar scope upfront so we don't
+  // have to re-prompt later when we need to read/write events.
   const login = useGoogleLogin({
-    flow: 'auth-code',
+    flow: 'auth-code',                                                          // server-side code-exchange flow
     scope: 'openid email profile https://www.googleapis.com/auth/calendar',
     onSuccess: async ({ code }) => {
+      // Hand the code to the backend to finish the OAuth dance.
       const res = await api.post('/auth/google', {
         code,
         redirect_uri: window.location.origin,
@@ -18,12 +33,15 @@ export default function LoginPage() {
       navigate(getRolePath(res.data.role))
     },
     onError: () => {
+      // Simple alert — Google rarely fails outside of dev misconfiguration.
       alert('Google sign-in failed. Please try again.')
     },
   })
 
   return (
     <div className="min-h-screen flex">
+      {/* Two-column layout: marketing/branding on the left, sign-in panel on the right.
+          The left column is hidden on mobile (md:flex) so phones only see the form. */}
       {/* Left — Branding */}
       <div className="hidden md:flex w-1/2 bg-gradient-to-br from-indigo-600 to-blue-700 flex-col justify-center items-center px-12 text-white relative overflow-hidden">
         {/* Subtle background pattern */}
